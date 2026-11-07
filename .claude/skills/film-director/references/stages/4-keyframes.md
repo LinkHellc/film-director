@@ -33,8 +33,8 @@
 
 - 写 `shots/<镜头>/first-prompt-v<n>.txt`：写明"在这张图上改：摄影机位置、构图、背景、光线完全不变，只改……"。
 - `node scripts/codex-image.ts <片名> --kind first --out shots/<镜头>/first --prompt films/<片名>/shots/<镜头>/first-prompt-v<n>.txt --ref films/<片名>/shots/<镜头>/last-v<n>.png`
-- 推近镜头：先画内容最多的首帧（远景），尾帧不画，用代码从首帧裁一块放大（`s` 是保留的比例，如 0.8；`l`、`t` 是裁切框左上角的像素位置；`'xb'` 保证不覆盖已有文件）：
-  `.venv/Scripts/python -c "from PIL import Image; im=Image.open('films/<片名>/shots/<镜头>/first-v<n>.png').convert('RGB'); W,H=im.size; s=0.8; w,h=round(W*s),round(H*s); l,t=0,0; im.crop((l,t,l+w,t+h)).resize((W,H),Image.LANCZOS).save(open('films/<片名>/shots/<镜头>/last-v<m>.png','xb'),'PNG')"`
+- 推近镜头：先画内容最多的首帧（远景），尾帧不画，用代码从首帧裁一块放大（`s` 是保留的比例，如 0.8；`l`、`t` 是裁切框左上角的像素位置，默认 `(W-w)//2,(H-h)//2` 即居中裁切；推向画面某一侧时，把它改成那一侧，例如推向右下角的人物写 `l,t=W-w,H-h`，推向左边写 `l=0`，`l` 取 0 到 `W-w`、`t` 取 0 到 `H-h` 之间；`'xb'` 保证不覆盖已有文件）：
+  `.venv/Scripts/python -c "from PIL import Image; im=Image.open('films/<片名>/shots/<镜头>/first-v<n>.png').convert('RGB'); W,H=im.size; s=0.8; w,h=round(W*s),round(H*s); l,t=(W-w)//2,(H-h)//2; im.crop((l,t,l+w,t+h)).resize((W,H),Image.LANCZOS).save(open('films/<片名>/shots/<镜头>/last-v<m>.png','xb'),'PNG')"`
 
 ### 4. 裁成 16:9、尺寸一致
 

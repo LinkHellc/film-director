@@ -219,3 +219,9 @@ test(".gitattributes normalizes text to LF (cmd/ps1 CRLF) and gates.md is LF", (
   }
   assert.ok(!read(join(SKILL, "references", "gates.md")).includes("\r\n"), "gates.md 还是 CRLF");
 });
+
+test("M-fix: push-in crop example in 4-keyframes.md is centered", () => {
+  const text = read(join(STAGES, "4-keyframes.md"));
+  assert.ok(text.includes("l,t=(W-w)//2,(H-h)//2"), "推近镜头的裁切示例要居中");
+  assert.ok(!text.includes("l,t=0,0"), "不能再默认裁左上角");
+});
