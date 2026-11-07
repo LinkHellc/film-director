@@ -201,3 +201,11 @@ test('C1: the Skill dispatches reviews to film-reviewer, never "Explore"', () =>
   assert.ok(!texts.includes('"Explore"'), 'Skill 里还有 "Explore"');
   assert.ok(read(join(SKILL, "SKILL.md")).includes('subagent_type: "film-reviewer"'), "SKILL.md 要用 film-reviewer 派审核");
 });
+
+test(".gitattributes normalizes text to LF (cmd/ps1 CRLF) and gates.md is LF", () => {
+  const ga = read(join(REPO, ".gitattributes"));
+  for (const line of ["* text=auto eol=lf", "*.cmd text eol=crlf", "*.ps1 text eol=crlf"]) {
+    assert.ok(ga.split(/\r?\n/).includes(line), `.gitattributes 缺少：${line}`);
+  }
+  assert.ok(!read(join(SKILL, "references", "gates.md")).includes("\r\n"), "gates.md 还是 CRLF");
+});

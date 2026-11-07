@@ -1,0 +1,4 @@
+# 文本统一用 LF；Windows 脚本保留 CRLF。二进制文件（png、mp4、pdf……）由 text=auto 自动识别，不做转换。
+* text=auto eol=lf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
