@@ -178,3 +178,26 @@ test("trial batch: G5 (human motion check) comes before quoting the remaining sh
   assert.ok(gate.includes("试拍"), "gates.md 的 G5 要写明试拍那批也要问");
   assert.ok(!gate.includes("进后期`"), "G5 的选项不能只适用于最后一批");
 });
+
+test("C1: project agent film-reviewer exists, read-only, inherits the session model", () => {
+  const p = join(REPO, ".claude", "agents", "film-reviewer.md");
+  assert.ok(existsSync(p), ".claude/agents/film-reviewer.md 不存在");
+  const text = read(p);
+  const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/.exec(text);
+  assert.ok(m, "film-reviewer.md 开头要有 frontmatter");
+  const fm = m[1];
+  assert.match(fm, /^name: film-reviewer$/m);
+  assert.match(fm, /^description: .*只读.*不改文件/m);
+  assert.match(fm, /^tools: Read, Glob, Grep$/m);
+  assert.match(fm, /^model: inherit$/m);
+  const body = m[2];
+  for (const s of ["只读不改", "reviews/", "state.json", "Read", '"通过"或"不通过"']) {
+    assert.ok(body.includes(s), `film-reviewer.md 正文缺少：${s}`);
+  }
+});
+
+test('C1: the Skill dispatches reviews to film-reviewer, never "Explore"', () => {
+  const texts = allFiles(SKILL).filter((p) => p.endsWith(".md")).map(read).join("\n");
+  assert.ok(!texts.includes('"Explore"'), 'Skill 里还有 "Explore"');
+  assert.ok(read(join(SKILL, "SKILL.md")).includes('subagent_type: "film-reviewer"'), "SKILL.md 要用 film-reviewer 派审核");
+});

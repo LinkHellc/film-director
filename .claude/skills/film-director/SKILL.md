@@ -67,7 +67,7 @@ description: 当本人说"开一支新片""做一支短片""拍个短片：…�
 审核只给清单和资料文件，不给对话和你的结论。每次审核都是一个全新的子 agent。
 
 1. 运行 `node scripts/review.ts prepare <类型> <片名> [--shot S01]`。类型是 `story`、`keyframe-plan`、`keyframes`、`pre-submit`、`final`；中间三种要带 `--shot`，另外两种不带。退出 0 时它打印 `reviews/<类型>[-<镜头>]-v<n>.prompt.md` 的绝对路径。
-2. 用 Bash 的 `cat` 读出这个 `.prompt.md` 的全文（不要用 Read，Read 会带行号）。用 Agent 工具开一个新的子 agent：`subagent_type: "Explore"`，`description` 写"审核 <类型> <镜头>"，`prompt` 就是这个文件的全文，原样粘贴，一个字都不加：不附对话内容、不附你的看法、不写文件路径让它自己去读（`reviews/` 下有旧的审核结论，不能让它看到）。
+2. 用 Bash 的 `cat` 读出这个 `.prompt.md` 的全文（不要用 Read，Read 会带行号）。用 Agent 工具开一个新的子 agent：`subagent_type: "film-reviewer"`（项目里的只读审核员 `.claude/agents/film-reviewer.md`，只有 Read、Glob、Grep，模型跟当前会话一样），`description` 写"审核 <类型> <镜头>"，`prompt` 就是这个文件的全文，原样粘贴，一个字都不加：不附对话内容、不附你的看法、不写文件路径让它自己去读（`reviews/` 下有旧的审核结论，不能让它看到）。
 3. 把子 agent 的最后回复原文（不删不改）用 Write 存成同一目录下的 `reviews/<类型>[-<镜头>]-v<n>.reply.md`（n 和 prompt.md 的一样）。
 4. 运行 `node scripts/review.ts record <片名> --prompt <prompt.md 绝对路径> --reply <reply.md 路径>`。
    - 退出 0：通过。
