@@ -1,0 +1,15 @@
+OpenAI Codex v0.77.0 (research preview)
+--------
+workdir: C:\Users\<user>\film\films\<片名>
+model: <model>
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: medium
+reasoning summaries: auto
+session id: {{SESSION_ID}}
+--------
+user
+{{PROMPT}}
+
+mcp startup: ready: node_repl, memory
