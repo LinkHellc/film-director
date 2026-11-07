@@ -225,3 +225,22 @@ test("M-fix: push-in crop example in 4-keyframes.md is centered", () => {
   assert.ok(text.includes("l,t=(W-w)//2,(H-h)//2"), "推近镜头的裁切示例要居中");
   assert.ok(!text.includes("l,t=0,0"), "不能再默认裁左上角");
 });
+
+test("I2: SKILL.md and README explain reconcile; only after the person gives a task id or says 没建成 this turn", () => {
+  const skill = read(join(SKILL, "SKILL.md"));
+  const readme = read(join(REPO, "README.md"));
+  for (const [name, text] of [["SKILL.md", skill], ["README.md", readme]] as const) {
+    assert.ok(text.includes("seedance.ts reconcile"), `${name} 要写 reconcile 命令`);
+    assert.ok(text.includes("--not-created"), `${name} 要写 --not-created`);
+    assert.ok(text.includes("网关后台"), `${name} 要写本人去网关后台查`);
+  }
+  assert.ok(skill.includes("本人在这一轮明确给出任务号或说\"没建成\""), "SKILL.md 要写明只在本人当轮明确给出任务号或说没建成之后才运行");
+});
+
+test("misc: 继续做 handles an approved-but-not-submitted quote without re-running approve.ts", () => {
+  const skill = read(join(SKILL, "SKILL.md"));
+  const sec = skill.slice(skill.indexOf("## 继续做"), skill.indexOf("## 每一步怎么做"));
+  assert.ok(sec.includes("approvals/Q<n>.json"), "继续做 要检查 approvals/Q<n>.json");
+  assert.ok(sec.includes("Q<n> 之前批准过、还没提交，现在提交吗"), "继续做 要先问本人");
+  assert.ok(sec.includes("不要再运行 `approve.ts`"), "继续做 要写明不要再运行 approve.ts");
+});

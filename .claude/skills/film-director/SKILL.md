@@ -50,6 +50,8 @@ description: 当本人说"开一支新片""做一支短片""拍个短片：…�
 3. 如果有 `films/<片名>/.submit.lock`：不要删它，把文件内容原样告诉本人，等本人处理。
 4. 如果 `state.shots` 里有镜头的 `status` 是 `generating`：先按"等出片"在后台运行 `wait`。
 5. 如果 `state.gates` 里有关口是 `asked`：上次问了还没答，按 `references/gates.md` 重新问一次。
+6. 如果有 `films/<片名>/approvals/Q<n>.json`、但 `spend.jsonl` 里没有这份报价（`quote` 是 Q<n>）的行：先问本人"Q<n> 之前批准过、还没提交，现在提交吗"。本人同意后直接运行 `node scripts/seedance.ts submit <片名> --quote Q<n>`，不要再运行 `approve.ts`（它会报"已经批准过"）；闸门不过就照原因处理（比如审核后改过文件就重新审核、重新报价）。本人不同意就先不提交，问本人想怎么办。
+7. 如果 `spend.jsonl` 里有 `uncertain: true`、还没有对应核对行（同报价同镜头、带 `reconcile`）的行：这一镜提交结果不明，按"出错处理"里"提交结果不明"那一条处理，不要重新提交。
 
 ## 每一步怎么做
 
@@ -96,6 +98,7 @@ description: 当本人说"开一支新片""做一支短片""拍个短片：…�
 | `node scripts/seedance.ts wait <片名> [--interval 30] [--timeout 3600]` | 0 全部结束并已下载（个别镜头"生成失败"也是 0，看输出）；1 有片段下载出错或没设 Key；2 用法不对；6 超时，已出好的已下载，再 `wait` 一次 |
 | `node scripts/seedance.ts poll <片名> [--json]` | 0 都结束了或没有待查任务；10 还有没结束的；1 没设 Key；2 用法不对（只在本人要看进度时用一次） |
 | `node scripts/seedance.ts fetch <片名>` | 0 下载完成；1 有下载出错或没设 Key；2 用法不对（`wait` 已经包含下载，一般不用） |
+| `node scripts/seedance.ts reconcile <片名> --quote Q<n> --shot S01 (--task <任务号> \| --not-created) --note '<本人说明原文>'` | 0 已记下核对（`--task`：之后 `wait` 会下载这个任务；`--not-created`：已花金额不再算这一镜）；1 这一镜在这份报价里没有结果不明的行、已经核对过、任务号已记过或锁还在；2 用法不对。不联网、不花钱 |
 | `.venv/Scripts/python scripts/py/sketch.py <分镜JSON> <输出png>` | 0 已画总表；2 JSON 不对或输出已存在 |
 | `.venv/Scripts/python scripts/py/grayscale.py <输入png> <输出png> [--board <分镜JSON>] [--min-contrast 0.25]` | 0 明暗对比都够；1 有色块对比不够（逐条列出）；2 参数不对或输出已存在 |
 | `.venv/Scripts/python scripts/py/frames.py extract <视频> <输出目录> [--every 0.5 \| --around 2.0,5.0 [--n 3]]` | 0 已抽帧；1 ffmpeg 出错；2 参数不对或有重名帧（一张都没写） |
@@ -116,7 +119,7 @@ Python 工具的退出码约定：0 成功；1 检查没通过或 ffmpeg 出错�
 | 出的图比例不对 | 用 `frames.py crop169` 裁切存新版本，不重画。 |
 | 同一项审核连续 3 次"不通过" | 停下，问本人怎么改（`references/gates.md` 的"审核卡住"）。 |
 | Seedance 任务失败（`wait` 输出"<镜头> 生成失败：<原因>"） | 读原因。参数问题（规格、时长、图片格式、内容审核）→ 改完提示词或首尾帧，重新审核、重新报价。临时错误（超时、网关出错）→ 先请本人到网关任务日志或账单确认那次失败没扣费；确认没扣，才同样内容重新报价重拍一次（G4 里写明是重试）；扣了或确认不了 → 当成新的一次重新报价，先问本人。 |
-| `submit` 退出 1 且输出"提交结果不明" | 可能已经扣费、已经按可能扣费记账。不要重发，把输出原样告诉本人，请本人到网关任务日志核对。 |
+| `submit` 退出 1 且输出"提交结果不明" | 可能已经扣费、已经按可能扣费记账。不要重发，把输出原样告诉本人，请本人到网关后台的任务日志核对这一镜建没建成任务。本人查清后由本人决定是否核对：只有本人在这一轮明确给出任务号或说"没建成"之后，你才运行 `node scripts/seedance.ts reconcile <片名> --quote Q<n> --shot <镜头> --task <本人给的任务号> --note '<本人原话>'`（建成了，之后 `wait` 下载）或 `... --not-created --note '<本人原话>'`（没建成，已花金额扣回这一镜）。不要自己猜任务号，不要替本人下结论。这份报价不能再提交（闸门 7）；没建成的镜头要拍就重新报价、问 G4。 |
 | `submit` 退出 1 且输出"另一个提交正在进行" | 不要删锁文件。把输出原样告诉本人，等本人处理。 |
 | `submit` 退出 4（欠费） | 停止提交，用已有片段粗剪一版给本人看（`references/stages/6-generate.md`），告诉本人欠费了，停下。不充值，不重试。 |
 | `submit` 退出 7（建了任务没记上账） | 立刻停下，把命令打印的全部内容原样告诉本人（任务号、金额、应补记的那一行）。不要自己补记 `spend.jsonl`，不要删 `.submit.lock`，不要重新提交。 |
@@ -128,7 +131,7 @@ Python 工具的退出码约定：0 成功；1 检查没通过或 ffmpeg 出错�
 ## 硬性禁止
 
 - 不手动调用视频接口（不用 curl、fetch 或自己写代码请求网关），只能经过 `scripts/seedance.ts`。
-- 不手写或改动 `spend.jsonl`、`fetched.jsonl`、`approvals/`、`quotes/`、`reviews/*.json`、`.submit.lock`；这些只由脚本写。
+- 不手写或改动 `spend.jsonl`、`fetched.jsonl`、`approvals/`、`quotes/`、`reviews/*.json`、`.submit.lock`；这些只由脚本写（结果不明的核对也只能经 `seedance.ts reconcile`，并且要本人这一轮明确说了结果）。
 - `approve.ts` 只在本人这一轮的回答里明确选了"批准 Q<n>"（或亲口写了"批准 Q<n>"）之后才运行，`--said` 填本人回答的原文，不改写、不补字。回答含糊（"可以""行吧"）就再问一次 G4，不运行。旧的回答不能拿来批准新的报价。用编号选项在对话里问 G4 时，请本人原样打出 `批准 Q<n>`；只回一个数字不算批准。`approve.ts` 只认选项原文，或以 `批准 Q<n>` 开头、不含否定、疑问、拖延字样的回答（详见 `references/gates.md` 的 G4）。
 - 不覆盖、不删除文件（`state.json` 原地更新、`requirements.md` 追加除外）。
 - 不打印 `SEEDANCE_API_KEY`，不把它写进任何文件或命令行；只检查它有没有设。
