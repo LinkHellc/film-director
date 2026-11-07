@@ -159,3 +159,22 @@ test("no Skill text contains forbidden strings", () => {
     }
   }
 });
+
+test("trial batch: G5 (human motion check) comes before quoting the remaining shots", () => {
+  const gen = read(join(STAGES, "6-generate.md"));
+  const g5 = gen.search(/^###\s*\d+\.\s*问 G5/m);
+  const rest = gen.indexOf("再给其余镜头报价");
+  assert.ok(g5 >= 0, "6-generate.md 要有「问 G5」一步");
+  assert.ok(rest >= 0, "6-generate.md 要写「再给其余镜头报价」");
+  assert.ok(g5 < rest, "6-generate.md 里问 G5 要在给其余镜头报价之前");
+  assert.ok(gen.includes('试拍的镜头本人在 G5 看过、选了"都可以"后，再给其余镜头报价'));
+
+  const prompts = read(join(STAGES, "5-prompts.md"));
+  const p5 = prompts.indexOf("G5");
+  const pRest = prompts.indexOf("才给其余镜头报价");
+  assert.ok(p5 >= 0 && pRest > p5, "5-prompts.md 要写明试拍先过 G5 再给其余镜头报价");
+
+  const gate = gateSection("G5")!;
+  assert.ok(gate.includes("试拍"), "gates.md 的 G5 要写明试拍那批也要问");
+  assert.ok(!gate.includes("进后期`"), "G5 的选项不能只适用于最后一批");
+});
