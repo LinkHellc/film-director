@@ -30,10 +30,14 @@ function readOrNull(path: string): string | null {
   }
 }
 
-/** 原话里要有 "批准 Q3"（半角空格），且后面不能紧跟数字（"批准 Q31" 不算 Q3）。 */
+/**
+ * 原话里要有 "批准 Q3"（半角空格），且后面不能紧跟数字（"批准 Q31" 不算 Q3）；
+ * "批准" 前 3 个字以内出现 不/别/勿/没/未 的不算（"不批准"、"先不要批准"、"别急着批准"）。
+ * 宁可错拒（如"不错，批准 Q3"会被拒），不可错收。
+ */
 export function saidApproves(said: string, quoteId: string): boolean {
   assertQuoteId(quoteId);
-  return new RegExp(`批准 ${quoteId}(?!\\d)`).test(said);
+  return new RegExp(`(?<![不别勿没未][^]{0,2})批准 ${quoteId}(?!\\d)`).test(said);
 }
 
 /** 读 approvals/<报价号>.json；没有批准过返回 null。报价号不合法时抛错。 */

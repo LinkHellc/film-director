@@ -163,3 +163,22 @@ test("readApproval：报价号不合法时抛错", async () => {
     assert.throws(() => readApproval(FILM, "../Q3"), /报价号不合法/);
   });
 });
+
+test("原话里否定了批准：退出 1，不写文件（不批准、别批准、先不要批准、没批准、未批准、勿批准）", async () => {
+  await withFilm(async (dir, out) => {
+    writeQuote(dir, "Q3");
+    for (const said of ["不批准 Q3", "别批准 Q3", "先不要批准 Q3", "没批准 Q3", "还未批准 Q3", "勿批准 Q3", "不，别急着批准 Q3"]) {
+      assert.equal(await main([FILM, "Q3", "--said", said]), 1, said);
+      assert.equal(out.at(-1), '本人原话里没有"批准 Q3"');
+    }
+    assert.deepEqual(approvals(dir), []);
+  });
+});
+
+test("卡片选项原文“批准 Q3（¥1.5）”可以批准", async () => {
+  await withFilm(async (dir) => {
+    writeQuote(dir, "Q3");
+    assert.equal(await main([FILM, "Q3", "--said", "批准 Q3（¥1.5）"]), 0);
+    assert.deepEqual(approvals(dir), ["Q3.json"]);
+  });
+});

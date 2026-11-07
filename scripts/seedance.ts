@@ -1,0 +1,508 @@
+import { appendFileSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
+import { join, relative, resolve } from "node:path";
+import { assertFilmName, filmDir } from "./lib/paths.ts";
+import { readState, writeState } from "./lib/state.ts";
+import { latestVersionPath, nextVersionPath, writeNew } from "./lib/versioned.ts";
+import { sha256File } from "./lib/hash.ts";
+import { latestReviewPath, readPricing, readSpendRows, round1, spentFromLog, type Quote, type SpendRow } from "./quote.ts";
+import { readApproval } from "./approve.ts";
+import {
+  apiKey,
+  ArrearsError,
+  createTask,
+  downloadVideo,
+  GatewayError,
+  getTask,
+  MissingKeyError,
+  scrub,
+  type TaskStatus,
+} from "./lib/video-api.ts";
+
+const USAGE =
+  "用法：seedance.ts submit <片名> --quote Q<n>\n" +
+  "      seedance.ts poll <片名> [--json]\n" +
+  "      seedance.ts fetch <片名>\n" +
+  "      seedance.ts wait <片名> [--interval 30] [--timeout 3600]";
+const QUOTE_ID_RE = /^Q\d+$/;
+const SHOT_RE = /^[A-Za-z0-9_]{1,20}$/;
+const EPS = 1e-9;
+const LOCK = ".submit.lock";
+
+/** 提交前审核要和现在一致的三类文件（requirements.md 改了不拦：它是全片要求，不是这一镜的提交内容）。 */
+const SHOT_FILES = [
+  { base: "prompt", ext: "txt", label: "提示词" },
+  { base: "first", ext: "png", label: "首帧" },
+  { base: "last", ext: "png", label: "尾帧" },
+] as const;
+
+function fwd(p: string): string {
+  return p.replace(/\\/g, "/");
+}
+
+/** 审核记录的键是 fwd(resolve(路径))；Windows 上路径不分大小写。 */
+function normKey(p: string): string {
+  const f = fwd(resolve(p));
+  return process.platform === "win32" ? f.toLowerCase() : f;
+}
+
+function rel(dir: string, p: string): string {
+  return fwd(relative(dir, p));
+}
+
+/** 读 JSON；文件不存在返回 undefined，内容坏了返回 null。 */
+function readJson(path: string): unknown {
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw err;
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function latestShotFile(dir: string, shot: string, base: string, ext: string): string | null {
+  return latestVersionPath(join(dir, "shots", shot), base, ext);
+}
+
+function isFiniteNum(x: unknown): x is number {
+  return typeof x === "number" && Number.isFinite(x);
+}
+
+/** 报价内容是否完整可用（不完整的报价一律不提交）。 */
+function validQuote(q: any, id: string): q is Quote {
+  return (
+    q && typeof q === "object" && q.id === id && typeof q.model === "string" && typeof q.modelId === "string" &&
+    isFiniteNum(q.totalCNY) && Array.isArray(q.shots) && q.shots.length > 0 &&
+    q.shots.every(
+      (s: any) =>
+        s && typeof s.shot === "string" && SHOT_RE.test(s.shot) && Number.isInteger(s.billable) && s.billable >= 4 &&
+        typeof s.reviewHash === "string",
+    ) &&
+    new Set(q.shots.map((s: any) => s.shot)).size === q.shots.length
+  );
+}
+
+/**
+ * 提交前的 7 道闸门，按顺序返回所有不满足的原因；空数组 = 通过。
+ * 1 报价存在且不超预算；2 模型支持首尾帧（且报价的模型、金额和现在的价格表一致）；
+ * 3 每镜最新提交前审核是"通过"；4 审核后没改过提示词/首帧/尾帧（且审核记录就是报价时那份）；
+ * 5 本人批准了这份报价、金额一致；6 按 spend.jsonl 现算不超预算；7 这份报价没提交过。
+ */
+export function checkGates(film: string, quoteId: string): string[] {
+  if (typeof quoteId !== "string" || !QUOTE_ID_RE.test(quoteId)) return [`报价号不合法：${quoteId}`];
+  const dir = filmDir(film);
+
+  // 1
+  const raw = readJson(join(dir, "quotes", `${quoteId}.json`));
+  if (raw === undefined) return [`报价 ${quoteId} 不存在`];
+  if (!validQuote(raw, quoteId)) return [`报价 ${quoteId} 内容不完整`];
+  const q = raw;
+  const g: string[][] = [[], [], [], [], [], [], [], []];
+  if (q.overBudget !== false) g[1].push(`报价 ${quoteId} 超预算，不能提交`);
+
+  // 2
+  const pricing = readPricing();
+  const price = Object.hasOwn(pricing.models, q.model) ? pricing.models[q.model] : undefined;
+  const seconds = q.shots.reduce((a, s) => a + s.billable, 0);
+  let rawTotal = q.totalCNY;
+  if (!price || !isFiniteNum(price.cnyPerSecond720p)) {
+    g[2].push(`价格表里没有模型 ${q.model}`);
+  } else {
+    if (price.firstLastFrame !== true) g[2].push(`模型 ${price.id} 不支持首尾帧`);
+    rawTotal = seconds * price.cnyPerSecond720p;
+    if (q.modelId !== price.id) g[2].push(`报价 ${quoteId} 的模型 ${q.modelId} 和价格表里的 ${price.id} 对不上，请重新报价`);
+    else if (round1(rawTotal) !== q.totalCNY) g[2].push(`报价 ${quoteId} 的金额和现在的单价对不上，请重新报价`);
+  }
+
+  // 3、4
+  let state: ReturnType<typeof readState> | null = null;
+  try {
+    state = readState(film);
+  } catch {
+    g[3].push("读不到 state.json");
+  }
+  for (const line of q.shots) {
+    const shot = line.shot;
+    if (state && !Object.hasOwn(state.shots, shot)) {
+      g[3].push(`没有这个镜头：${shot}`);
+      continue;
+    }
+    const rp = latestReviewPath(dir, shot);
+    const rec = rp ? (readJson(rp) as any) : undefined;
+    if (!rp || !rec || rec.kind !== "pre-submit" || rec.shot !== shot || rec.verdict !== "pass") {
+      g[3].push(`${shot} 的提交前审核不是"通过"`);
+      continue;
+    }
+    if (sha256File(rp) !== line.reviewHash) g[4].push(`${shot} 报价后又审核过，请重新报价`);
+    const recorded = new Map<string, unknown>();
+    if (rec.files && typeof rec.files === "object") {
+      for (const [k, v] of Object.entries(rec.files)) recorded.set(normKey(k), v);
+    }
+    for (const f of SHOT_FILES) {
+      const cur = latestShotFile(dir, shot, f.base, f.ext);
+      if (cur === null) {
+        g[4].push(`${shot} 缺少${f.label}：shots/${shot}/${f.base}-v*.${f.ext}`);
+        continue;
+      }
+      const h = recorded.get(normKey(cur));
+      if (typeof h !== "string" || h !== sha256File(cur)) g[4].push(`${shot} 审核后改过文件：${rel(dir, cur)}`);
+      else if (f.base === "prompt" && !readFileSync(cur, "utf8").trim()) g[4].push(`${shot} 的提示词是空的`);
+    }
+  }
+
+  // 5
+  let appr: ReturnType<typeof readApproval> = null;
+  try {
+    appr = readApproval(film, quoteId);
+  } catch {
+    appr = null;
+  }
+  if (!appr || appr.quote !== quoteId || !isFiniteNum(appr.totalCNY) || appr.totalCNY !== q.totalCNY) {
+    g[5].push(`报价 ${quoteId} 还没有本人批准`);
+  }
+
+  // 6、7
+  let rows: SpendRow[] | null = null;
+  try {
+    rows = readSpendRows(dir);
+  } catch (err) {
+    g[6].push((err as Error).message);
+  }
+  const budget = state?.settings?.budgetCNY;
+  if (rows) {
+    const spent = rows.reduce((a, r) => a + r.cny, 0);
+    if (!isFiniteNum(budget) || budget < 0) {
+      g[6].push(budget === null || budget === undefined ? "还没有设总预算" : `总预算不合法：${JSON.stringify(budget)}`);
+    } else if (!(spent + rawTotal <= budget + EPS)) {
+      g[6].push(`花费会超预算：已花 ¥${spent.toFixed(1)} + 本次 ¥${q.totalCNY.toFixed(1)} > 预算 ¥${budget.toFixed(1)}`);
+    }
+    if (rows.some((r) => r.quote === quoteId)) g[7].push(`报价 ${quoteId} 已经提交过`);
+  }
+  return g.flat();
+}
+
+function usage(): number {
+  console.error(USAGE);
+  return 2;
+}
+
+function needKey(): boolean {
+  try {
+    apiKey();
+    return true;
+  } catch (err) {
+    console.error((err as Error).message);
+    return false;
+  }
+}
+
+/** 追加一行 JSON；原文件末尾没有换行时先补一个。 */
+function appendJsonl(path: string, row: object): void {
+  let prefix = "";
+  try {
+    const cur = readFileSync(path, "utf8");
+    if (cur.length > 0 && !cur.endsWith("\n")) prefix = "\n";
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+  }
+  appendFileSync(path, prefix + JSON.stringify(row) + "\n");
+}
+
+function updateShot(film: string, shot: string, patch: { status?: string; clip?: string }, spent?: number): void {
+  const st = readState(film);
+  if (Object.hasOwn(st.shots, shot)) Object.assign(st.shots[shot], patch);
+  if (spent !== undefined) st.spentCNY = spent;
+  writeState(st);
+}
+
+async function submit(args: string[]): Promise<number> {
+  const [film, ...rest] = args;
+  let quoteId: string | undefined;
+  for (let i = 0; i < rest.length; i++) {
+    if (rest[i] === "--quote" && i + 1 < rest.length) quoteId = rest[++i];
+    else return usage();
+  }
+  if (!film || !quoteId || !QUOTE_ID_RE.test(quoteId)) return usage();
+  try {
+    assertFilmName(film);
+  } catch (err) {
+    console.error((err as Error).message);
+    return 2;
+  }
+  if (!needKey()) return 1;
+  const dir = filmDir(film);
+
+  // 一次只允许一个提交：先占锁，再查闸门，查完到发完都在锁里
+  const lock = join(dir, LOCK);
+  try {
+    writeNew(lock, JSON.stringify({ pid: process.pid, quote: quoteId, at: new Date().toISOString() }));
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === "EEXIST") {
+      console.error(`另一个提交正在进行（films/${film}/${LOCK}）；确认没有在提交后删掉这个文件再试`);
+      return 1;
+    }
+    if (code === "ENOENT") {
+      console.error(`没有这部片子：${film}`);
+      return 1;
+    }
+    throw err;
+  }
+  try {
+    const reasons = checkGates(film, quoteId);
+    if (reasons.length > 0) {
+      for (const r of reasons) console.error(r);
+      return 1;
+    }
+    const q = readJson(join(dir, "quotes", `${quoteId}.json`)) as Quote;
+    const price = readPricing().models[q.model];
+    const aspect = readState(film).settings.aspect;
+    const spendPath = join(dir, "spend.jsonl");
+    let n = 0;
+    let total = 0;
+    for (const line of q.shots) {
+      const shot = line.shot;
+      const cny = line.billable * price.cnyPerSecond720p;
+      const row = { at: "", quote: quoteId, shot, task: null as string | null, model: price.id, billable: line.billable, cny };
+      try {
+        const prompt = readFileSync(latestShotFile(dir, shot, "prompt", "txt")!, "utf8").trim();
+        const { id } = await createTask({
+          model: price.id,
+          prompt,
+          firstFrame: latestShotFile(dir, shot, "first", "png")!,
+          lastFrame: latestShotFile(dir, shot, "last", "png")!,
+          seconds: line.billable,
+          resolution: "720p",
+          aspectRatio: aspect,
+        });
+        appendJsonl(spendPath, { ...row, at: new Date().toISOString(), task: id });
+        updateShot(film, shot, { status: "generating" }, spentFromLog(dir));
+        n++;
+        total += cny;
+        console.log(`已提交 ${shot}：${id}（${line.billable} 秒，约 ¥${cny.toFixed(2)}）`);
+      } catch (err) {
+        if (err instanceof ArrearsError) {
+          console.error(`网关说余额或额度不足：${scrub(err.message)}`);
+          console.error(`欠费：已提交 ${n} 镜，其余未提交`);
+          return 4;
+        }
+        if (err instanceof GatewayError && err.uncertain) {
+          // 不知道建没建成：按可能已扣费记账（预算照算、这份报价不能再提交），不重发
+          appendJsonl(spendPath, { ...row, at: new Date().toISOString(), uncertain: true });
+          updateShot(film, shot, {}, spentFromLog(dir));
+          console.error(
+            `${shot} 提交结果不明（${scrub(err.message)}）：可能已经建了任务并扣费，已按 ¥${cny.toFixed(2)} 记入 spend.jsonl。` +
+              "请到网关的任务日志核对，不要直接重发。",
+          );
+          console.error(`已提交 ${n} 镜，其余未提交`);
+          return 1;
+        }
+        if (err instanceof MissingKeyError) {
+          console.error(err.message);
+          return 1;
+        }
+        const msg = err instanceof GatewayError ? `网关拒绝了（${scrub(err.message)}），没有建任务` : scrub((err as Error).message);
+        console.error(`${shot} 提交失败：${msg}`);
+        console.error(`已提交 ${n} 镜，其余未提交`);
+        return 1;
+      }
+    }
+    console.log(`已提交 ${n} 镜，约 ¥${round1(total).toFixed(1)}（估算，以账单为准）；用 wait 等出片`);
+    return 0;
+  } finally {
+    try {
+      unlinkSync(lock);
+    } catch {
+      /* 锁已不在 */
+    }
+  }
+}
+
+interface Pending {
+  shot: string;
+  task: string;
+}
+
+interface PollResult extends Pending {
+  status: TaskStatus | "unknown";
+  videoUrl?: string;
+  error?: string;
+}
+
+/** fetched.jsonl：下载完或失败结束的任务（之后不再查询）。 */
+function doneTasks(dir: string): Set<string> {
+  let raw: string;
+  try {
+    raw = readFileSync(join(dir, "fetched.jsonl"), "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return new Set();
+    throw err;
+  }
+  const done = new Set<string>();
+  const lines = raw.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i].trim()) continue;
+    let row: any;
+    try {
+      row = JSON.parse(lines[i]);
+    } catch {
+      throw new Error(`fetched.jsonl 第 ${i + 1} 行不是合法的 JSON`);
+    }
+    if (typeof row?.task === "string") done.add(row.task);
+  }
+  return done;
+}
+
+/** spend.jsonl 里有任务编号、还没下载或失败结束的任务（按提交顺序，去重）。 */
+function pendingTasks(dir: string): Pending[] {
+  const done = doneTasks(dir);
+  const out: Pending[] = [];
+  const seen = new Set<string>();
+  for (const r of readSpendRows(dir)) {
+    if (typeof r.task !== "string" || !r.task || typeof r.shot !== "string") continue;
+    if (done.has(r.task) || seen.has(r.task)) continue;
+    seen.add(r.task);
+    out.push({ shot: r.shot, task: r.task });
+  }
+  return out;
+}
+
+async function pollOnce(dir: string): Promise<PollResult[]> {
+  const out: PollResult[] = [];
+  for (const p of pendingTasks(dir)) {
+    try {
+      out.push({ ...p, ...(await getTask(p.task)) });
+    } catch (err) {
+      if (err instanceof MissingKeyError) throw err;
+      out.push({ ...p, status: "unknown", error: scrub((err as Error).message) });
+    }
+  }
+  return out;
+}
+
+function unfinished(results: PollResult[]): boolean {
+  return results.some((r) => r.status === "queued" || r.status === "running" || r.status === "unknown");
+}
+
+const LABEL: Record<PollResult["status"], string> = {
+  queued: "排队中",
+  running: "生成中",
+  succeeded: "已完成",
+  failed: "失败",
+  unknown: "查询失败",
+};
+
+function filmArg(film: string | undefined): string | null {
+  if (!film) return null;
+  try {
+    assertFilmName(film);
+    return film;
+  } catch (err) {
+    console.error((err as Error).message);
+    return null;
+  }
+}
+
+async function poll(args: string[]): Promise<number> {
+  const [filmRaw, ...rest] = args;
+  let json = false;
+  for (const a of rest) {
+    if (a === "--json") json = true;
+    else return usage();
+  }
+  const film = filmArg(filmRaw);
+  if (!film) return usage();
+  if (!needKey()) return 1;
+  const results = await pollOnce(filmDir(film));
+  if (json) console.log(JSON.stringify(results));
+  else if (results.length === 0) console.log("没有待查询的任务");
+  else {
+    for (const r of results) console.log(`${r.shot} ${r.task}：${LABEL[r.status]}${r.error ? `：${r.error}` : ""}`);
+  }
+  return unfinished(results) ? 10 : 0;
+}
+
+/** 下载成功的、记下失败的；还在跑的跳过。返回 0，有下载出错返回 1。 */
+async function fetchAll(film: string): Promise<number> {
+  const dir = filmDir(film);
+  const fetchedPath = join(dir, "fetched.jsonl");
+  let code = 0;
+  for (const r of await pollOnce(dir)) {
+    if (r.status === "succeeded") {
+      const shotDir = join(dir, "shots", r.shot);
+      mkdirSync(shotDir, { recursive: true });
+      const dest = nextVersionPath(shotDir, "clip", "mp4");
+      try {
+        await downloadVideo(r.task, r.videoUrl, dest);
+      } catch (err) {
+        console.error(`${r.shot} 下载失败：${scrub((err as Error).message)}`);
+        code = 1;
+        continue;
+      }
+      const clip = rel(dir, dest);
+      appendJsonl(fetchedPath, { at: new Date().toISOString(), task: r.task, shot: r.shot, status: "downloaded", clip });
+      updateShot(film, r.shot, { status: "generated", clip });
+      console.log(`${r.shot} 已下载：${clip}`);
+    } else if (r.status === "failed") {
+      const why = r.error || "失败";
+      appendJsonl(fetchedPath, { at: new Date().toISOString(), task: r.task, shot: r.shot, status: "failed", error: why });
+      updateShot(film, r.shot, { status: "failed" });
+      console.error(`${r.shot} 生成失败：${why}`);
+    } else {
+      console.log(`${r.shot} ${r.task}：${LABEL[r.status]}${r.error ? `：${r.error}` : ""}`);
+    }
+  }
+  return code;
+}
+
+async function fetchCmd(args: string[]): Promise<number> {
+  const [filmRaw, ...rest] = args;
+  if (rest.length > 0) return usage();
+  const film = filmArg(filmRaw);
+  if (!film) return usage();
+  if (!needKey()) return 1;
+  return fetchAll(film);
+}
+
+async function wait(args: string[]): Promise<number> {
+  const [filmRaw, ...rest] = args;
+  let interval = 30;
+  let timeout = 3600;
+  for (let i = 0; i < rest.length; i++) {
+    const v = Number(rest[i + 1]);
+    if (rest[i] === "--interval" && i + 1 < rest.length && Number.isFinite(v) && v >= 0) interval = v, i++;
+    else if (rest[i] === "--timeout" && i + 1 < rest.length && Number.isFinite(v) && v > 0) timeout = v, i++;
+    else return usage();
+  }
+  const film = filmArg(filmRaw);
+  if (!film) return usage();
+  if (!needKey()) return 1;
+  const dir = filmDir(film);
+  const deadline = Date.now() + timeout * 1000;
+  for (;;) {
+    const results = await pollOnce(dir);
+    if (!unfinished(results)) return fetchAll(film);
+    const left = deadline - Date.now();
+    if (left <= 0) {
+      console.log("还没出完，稍后再 wait");
+      return 6;
+    }
+    await new Promise((ok) => setTimeout(ok, Math.min(interval * 1000, left)));
+  }
+}
+
+export async function main(argv: string[]): Promise<number> {
+  const [cmd, ...args] = argv;
+  if (cmd === "submit") return submit(args);
+  if (cmd === "poll") return poll(args);
+  if (cmd === "fetch") return fetchCmd(args);
+  if (cmd === "wait") return wait(args);
+  return usage();
+}
+
+if (import.meta.main) process.exit(await main(process.argv.slice(2)));

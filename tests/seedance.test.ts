@@ -1,0 +1,440 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { checkGates, main } from "../scripts/seedance.ts";
+import { main as quote } from "../scripts/quote.ts";
+import { main as approve } from "../scripts/approve.ts";
+import { sha256File } from "../scripts/lib/hash.ts";
+import { readState, type FilmState } from "../scripts/lib/state.ts";
+import { startVideoServer, type VideoServer, type VideoServerOptions } from "./fakes/video-server.ts";
+
+const FILM = "提交片";
+const KEY = "sk-test-SECRET-9f8e7d6c5b4a";
+const PNG = (tag: string) => new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, ...new TextEncoder().encode(tag)]);
+
+function fwd(p: string): string {
+  return p.replace(/\\/g, "/");
+}
+
+interface Ctx {
+  dir: string;
+  out: string[];
+  gw: VideoServer;
+}
+
+/** 临时 FILM_ROOT + 一部素材齐全、审核通过的片子 + 假网关 + 环境变量 + 捕获输出。 */
+async function withFilm(
+  opts: { shots?: string[]; gw?: VideoServerOptions },
+  fn: (c: Ctx) => Promise<void>,
+): Promise<void> {
+  const root = mkdtempSync(join(tmpdir(), "film-seedance-"));
+  const saved = { FILM_ROOT: process.env.FILM_ROOT, SEEDANCE_BASE_URL: process.env.SEEDANCE_BASE_URL, SEEDANCE_API_KEY: process.env.SEEDANCE_API_KEY };
+  const out: string[] = [];
+  const log = console.log;
+  const err = console.error;
+  const gw = await startVideoServer(opts.gw ?? {});
+  console.log = (...a: unknown[]) => void out.push(a.join(" "));
+  console.error = (...a: unknown[]) => void out.push(a.join(" "));
+  try {
+    process.env.FILM_ROOT = root;
+    process.env.SEEDANCE_BASE_URL = gw.url;
+    process.env.SEEDANCE_API_KEY = KEY;
+    const dir = join(root, "films", FILM);
+    const shots = opts.shots ?? ["S01", "S02"];
+    mkdirSync(join(dir, "reviews"), { recursive: true });
+    mkdirSync(join(dir, "quotes"), { recursive: true });
+    const state: FilmState = {
+      film: FILM,
+      stage: "generate",
+      settings: { seconds: 10, aspect: "16:9", budgetCNY: 100, music: null, subtitles: false, model: "mini" },
+      gates: {},
+      shots: Object.fromEntries(shots.map((s) => [s, { seconds: 4.4, status: "ready", clip: null }])),
+      spentCNY: 0,
+    };
+    writeFileSync(join(dir, "state.json"), JSON.stringify(state, null, 2));
+    writeFileSync(join(dir, "requirements.md"), "本人要求");
+    for (const s of shots) {
+      put(dir, `shots/${s}/prompt-v1.txt`, `${s} 的七段式提示词`);
+      put(dir, `shots/${s}/first-v1.png`, PNG(`${s}-first`));
+      put(dir, `shots/${s}/last-v1.png`, PNG(`${s}-last`));
+      review(dir, s, 1, "pass");
+    }
+    await fn({ dir, out, gw });
+  } finally {
+    console.log = log;
+    console.error = err;
+    await gw.close();
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+function put(dir: string, rel: string, data: string | Uint8Array): string {
+  const p = join(dir, ...rel.split("/"));
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, data);
+  return p;
+}
+
+/** 按 review.ts 的格式写一份 pre-submit 审核记录：当前最新的提示词、首帧、尾帧 + requirements.md。 */
+function review(dir: string, shot: string, n: number, verdict: "pass" | "fail"): void {
+  const files: Record<string, string> = {};
+  const latest = (base: string, ext: string) => {
+    const names = readdirSync(join(dir, "shots", shot)).filter((x) => new RegExp(`^${base}-v\\d+\\.${ext}$`).test(x));
+    names.sort((a, b) => Number(/v(\d+)/.exec(b)![1]) - Number(/v(\d+)/.exec(a)![1]));
+    return join(dir, "shots", shot, names[0]);
+  };
+  for (const p of [latest("prompt", "txt"), latest("first", "png"), latest("last", "png"), join(dir, "requirements.md")]) {
+    files[fwd(resolve(p))] = sha256File(p);
+  }
+  writeFileSync(
+    join(dir, "reviews", `pre-submit-${shot}-v${n}.json`),
+    JSON.stringify({ kind: "pre-submit", film: FILM, shot, verdict, at: new Date().toISOString(), files }, null, 2),
+  );
+}
+
+/** 报价 + 批准，返回报价号。 */
+async function quoteAndApprove(shots: string, model?: "mini" | "2.5"): Promise<string> {
+  const args = [FILM, "--shots", shots, ...(model ? ["--model", model] : [])];
+  assert.equal(await quote(args), 0);
+  const ids = readdirSync(join(process.env.FILM_ROOT!, "films", FILM, "quotes")).map((n) => Number(/^Q(\d+)/.exec(n)![1]));
+  const id = `Q${Math.max(...ids)}`;
+  assert.equal(await approve([FILM, id, "--said", `批准 ${id}`]), 0);
+  return id;
+}
+
+function spendLines(dir: string): any[] {
+  if (!existsSync(join(dir, "spend.jsonl"))) return [];
+  return readFileSync(join(dir, "spend.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+}
+
+function noKey(c: Ctx): void {
+  assert.ok(!c.out.join("\n").includes(KEY), "输出里出现了 Key");
+  assert.ok(!c.out.join("\n").includes("SECRET"), "输出里出现了 Key 片段");
+}
+
+// ---------- checkGates ----------
+
+test("checkGates：全部满足时返回 []", async () => {
+  await withFilm({}, async () => {
+    const id = await quoteAndApprove("S01,S02");
+    assert.deepEqual(checkGates(FILM, id), []);
+  });
+});
+
+test("闸门 1：报价不存在 / 报价超预算", async () => {
+  await withFilm({}, async (c) => {
+    assert.deepEqual(checkGates(FILM, "Q9"), ["报价 Q9 不存在"]);
+    const id = await quoteAndApprove("S01,S02");
+    const p = join(c.dir, "quotes", `${id}.json`);
+    const q = JSON.parse(readFileSync(p, "utf8"));
+    q.overBudget = true;
+    writeFileSync(p, JSON.stringify(q));
+    assert.deepEqual(checkGates(FILM, id), [`报价 ${id} 超预算，不能提交`]);
+  });
+});
+
+test("闸门 2：模型不支持首尾帧（seedance-2.5）", async () => {
+  await withFilm({}, async () => {
+    const id = await quoteAndApprove("S01,S02", "2.5");
+    assert.deepEqual(checkGates(FILM, id), ["模型 seedance-2.5 不支持首尾帧"]);
+  });
+});
+
+test("闸门 3：最新提交前审核不是通过", async () => {
+  await withFilm({}, async (c) => {
+    const id = await quoteAndApprove("S01,S02");
+    review(c.dir, "S01", 2, "fail");
+    assert.deepEqual(checkGates(FILM, id), ['S01 的提交前审核不是"通过"']);
+  });
+});
+
+test("rejects files changed after review：改 prompt-v1.txt、新增 prompt-v2.txt 都被拒；改 requirements.md 不拦", async () => {
+  await withFilm({}, async (c) => {
+    const id = await quoteAndApprove("S01,S02");
+    writeFileSync(join(c.dir, "requirements.md"), "本人要求（补充）");
+    assert.deepEqual(checkGates(FILM, id), []);
+    appendFileSync(join(c.dir, "shots", "S01", "prompt-v1.txt"), "字");
+    assert.deepEqual(checkGates(FILM, id), ["S01 审核后改过文件：shots/S01/prompt-v1.txt"]);
+  });
+  await withFilm({}, async (c) => {
+    const id = await quoteAndApprove("S01,S02");
+    put(c.dir, "shots/S02/prompt-v2.txt", "新提示词");
+    assert.deepEqual(checkGates(FILM, id), ["S02 审核后改过文件：shots/S02/prompt-v2.txt"]);
+  });
+  await withFilm({}, async (c) => {
+    const id = await quoteAndApprove("S01,S02");
+    put(c.dir, "shots/S01/last-v2.png", PNG("new-last"));
+    assert.deepEqual(checkGates(FILM, id), ["S01 审核后改过文件：shots/S01/last-v2.png"]);
+  });
+});
+
+test("闸门 4：报价之后又审核过（审核记录不是报价时那份）也被拒", async () => {
+  await withFilm({}, async (c) => {
+    const id = await quoteAndApprove("S01,S02");
+    review(c.dir, "S01", 2, "pass");
+    assert.deepEqual(checkGates(FILM, id), ["S01 报价后又审核过，请重新报价"]);
+  });
+});
+
+test("闸门 5：没有批准 / 批准金额对不上 / 批准的不是这份报价", async () => {
+  await withFilm({}, async (c) => {
+    const id = await quoteAndApprove("S01,S02");
+    const p = join(c.dir, "approvals", `${id}.json`);
+    const a = JSON.parse(readFileSync(p, "utf8"));
+    writeFileSync(p, JSON.stringify({ ...a, totalCNY: 0.5 }));
+    assert.deepEqual(checkGates(FILM, id), [`报价 ${id} 还没有本人批准`]);
+    writeFileSync(p, JSON.stringify({ ...a, totalCNY: "1.5" }));
+    assert.deepEqual(checkGates(FILM, id), [`报价 ${id} 还没有本人批准`]);
+    writeFileSync(p, JSON.stringify({ ...a, quote: "Q7" }));
+    assert.deepEqual(checkGates(FILM, id), [`报价 ${id} 还没有本人批准`]);
+    unlinkSync(p);
+    assert.deepEqual(checkGates(FILM, id), [`报价 ${id} 还没有本人批准`]);
+  });
+});
+
+test("闸门 6：提交时按 spend.jsonl 重算，会超预算就拒", async () => {
+  await withFilm({}, async (c) => {
+    const id = await quoteAndApprove("S01,S02");
+    writeFileSync(join(c.dir, "spend.jsonl"), JSON.stringify({ quote: "Q0", shot: "X", cny: 98.6 }) + "\n");
+    assert.deepEqual(checkGates(FILM, id), ["花费会超预算：已花 ¥98.6 + 本次 ¥1.5 > 预算 ¥100.0"]);
+  });
+});
+
+test("闸门 7：报价已经提交过", async () => {
+  await withFilm({}, async (c) => {
+    const id = await quoteAndApprove("S01,S02");
+    writeFileSync(join(c.dir, "spend.jsonl"), JSON.stringify({ quote: id, shot: "S01", task: "t", cny: 0.75 }) + "\n");
+    assert.deepEqual(checkGates(FILM, id), [`报价 ${id} 已经提交过`]);
+  });
+});
+
+// ---------- submit ----------
+
+test("submit：闸门通过后逐镜头建任务、记账、改状态；请求格式与鉴权头正确；输出不含 Key", async () => {
+  await withFilm({}, async (c) => {
+    const id = await quoteAndApprove("S01,S02");
+    c.out.length = 0;
+    assert.equal(await main(["submit", FILM, "--quote", id]), 0);
+    const creates = c.gw.creates();
+    assert.equal(creates.length, 2);
+    for (const [i, s] of ["S01", "S02"].entries()) {
+      const r = creates[i];
+      assert.equal(r.authorization, `Bearer ${KEY}`);
+      const b = r.body as any;
+      assert.equal(b.model, "seedance-2.0-mini");
+      assert.equal(b.prompt, `${s} 的七段式提示词`);
+      assert.equal(b.seconds, 5);
+      assert.equal(b.resolution, "720p");
+      assert.equal(b.aspect_ratio, "16:9");
+      assert.equal(b.task_mode, "first_last_frame");
+      assert.deepEqual(b.content, [
+        { type: "image_url", role: "first_frame", url: "data:image/png;base64," + Buffer.from(PNG(`${s}-first`)).toString("base64") },
+        { type: "image_url", role: "last_frame", url: "data:image/png;base64," + Buffer.from(PNG(`${s}-last`)).toString("base64") },
+      ]);
+    }
+    const rows = spendLines(c.dir);
+    assert.equal(rows.length, 2);
+    assert.deepEqual(Object.keys(rows[0]).sort(), ["at", "billable", "cny", "model", "quote", "shot", "task"]);
+    assert.equal(rows[0].quote, id);
+    assert.equal(rows[0].shot, "S01");
+    assert.equal(rows[0].task, "task_fake0001");
+    assert.equal(rows[0].model, "seedance-2.0-mini");
+    assert.equal(rows[0].billable, 5);
+    assert.ok(Math.abs(rows[0].cny - 0.75) < 1e-9);
+    const st = readState(FILM);
+    assert.equal(st.shots.S01.status, "generating");
+    assert.equal(st.shots.S02.status, "generating");
+    assert.ok(Math.abs(st.spentCNY - 1.5) < 1e-9);
+    noKey(c);
+    for (const f of ["spend.jsonl", "state.json"]) assert.ok(!readFileSync(join(c.dir, f), "utf8").includes(KEY));
+  });
+});
+
+test("submit：闸门不过就逐条打印原因、退出 1、不发任何请求", async () => {
+  await withFilm({}, async (c) => {
+    const id = await quoteAndApprove("S01,S02");
+    unlinkSync(join(c.dir, "approvals", `${id}.json`));
+    appendFileSync(join(c.dir, "shots", "S01", "prompt-v1.txt"), "字");
+    c.out.length = 0;
+    assert.equal(await main(["submit", FILM, "--quote", id]), 1);
+    assert.ok(c.out.includes("S01 审核后改过文件：shots/S01/prompt-v1.txt"));
+    assert.ok(c.out.includes(`报价 ${id} 还没有本人批准`));
+    assert.equal(c.gw.requests.length, 0);
+    assert.deepEqual(spendLines(c.dir), []);
+  });
+});
+
+test("rejects quote already submitted：第二次提交退出 1，网关只收到第一次的请求，spend.jsonl 行数不变", async () => {
+  await withFilm({}, async (c) => {
+    const id = await quoteAndApprove("S01,S02");
+    assert.equal(await main(["submit", FILM, "--quote", id]), 0);
+    assert.equal(c.gw.creates().length, 2);
+    assert.equal(await main(["submit", FILM, "--quote", id]), 1);
+    assert.ok(c.out.includes(`报价 ${id} 已经提交过`));
+    assert.equal(c.gw.creates().length, 2);
+    assert.equal(spendLines(c.dir).length, 2);
+  });
+});
+
+test("stops batch on arrears：3 镜，第 2 个请求欠费 → 退出 4，只记 1 行，网关只收到 2 个请求", async () => {
+  await withFilm({ shots: ["S01", "S02", "S03"], gw: { creates: ["ok", "arrears"] } }, async (c) => {
+    const id = await quoteAndApprove("S01,S02,S03");
+    c.out.length = 0;
+    assert.equal(await main(["submit", FILM, "--quote", id]), 4);
+    assert.ok(c.out.includes("欠费：已提交 1 镜，其余未提交"), c.out.join("\n"));
+    assert.equal(spendLines(c.dir).length, 1);
+    assert.equal(c.gw.creates().length, 2);
+    const st = readState(FILM);
+    assert.equal(st.shots.S01.status, "generating");
+    assert.equal(st.shots.S02.status, "ready");
+    assert.equal(st.shots.S03.status, "ready");
+    noKey(c);
+  });
+});
+
+test("网关报错正文里带 Key 时打印前脱敏；退出 1，不记账", async () => {
+  await withFilm({ gw: { creates: ["echo-key"] } }, async (c) => {
+    const id = await quoteAndApprove("S01,S02");
+    c.out.length = 0;
+    assert.equal(await main(["submit", FILM, "--quote", id]), 1);
+    assert.match(c.out.join("\n"), /HTTP 400/);
+    assert.equal(c.gw.creates().length, 1);
+    assert.deepEqual(spendLines(c.dir), []);
+    noKey(c);
+  });
+});
+
+test("提交时连接断开（结果不明）：退出 1，按可能已扣费记账，之后同一报价不能再提交", async () => {
+  await withFilm({ gw: { creates: ["crash"] } }, async (c) => {
+    const id = await quoteAndApprove("S01,S02");
+    c.out.length = 0;
+    assert.equal(await main(["submit", FILM, "--quote", id]), 1);
+    assert.match(c.out.join("\n"), /结果不明/);
+    const rows = spendLines(c.dir);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].task, null);
+    assert.equal(rows[0].uncertain, true);
+    assert.ok(Math.abs(rows[0].cny - 0.75) < 1e-9);
+    assert.equal(c.gw.creates().length, 1);
+    assert.deepEqual(checkGates(FILM, id), [`报价 ${id} 已经提交过`]);
+    noKey(c);
+  });
+});
+
+test("没设 SEEDANCE_API_KEY：退出 1，不发请求", async () => {
+  await withFilm({}, async (c) => {
+    const id = await quoteAndApprove("S01,S02");
+    delete process.env.SEEDANCE_API_KEY;
+    for (const argv of [["submit", FILM, "--quote", id], ["poll", FILM], ["fetch", FILM], ["wait", FILM]]) {
+      c.out.length = 0;
+      assert.equal(await main(argv), 1, argv.join(" "));
+      assert.equal(c.out.at(-1), "没有设置 SEEDANCE_API_KEY");
+    }
+    assert.equal(c.gw.requests.length, 0);
+  });
+});
+
+test("另一个提交正在进行（有锁文件）：退出 1，不发请求", async () => {
+  await withFilm({}, async (c) => {
+    const id = await quoteAndApprove("S01,S02");
+    writeFileSync(join(c.dir, ".submit.lock"), "");
+    assert.equal(await main(["submit", FILM, "--quote", id]), 1);
+    assert.match(c.out.at(-1)!, /另一个提交正在进行/);
+    assert.equal(c.gw.requests.length, 0);
+  });
+});
+
+test("参数不对：退出 2", async () => {
+  await withFilm({}, async () => {
+    for (const argv of [[], ["submit", FILM], ["submit", FILM, "--quote"], ["bogus", FILM], ["wait", FILM, "--interval", "-1"], ["poll"]]) {
+      assert.equal(await main(argv), 2, JSON.stringify(argv));
+    }
+  });
+});
+
+// ---------- poll / fetch / wait ----------
+
+test("poll：有任务在跑时退出 10；--json 输出数组；全部结束退出 0", async () => {
+  await withFilm({ gw: { succeedAfter: 2 } }, async (c) => {
+    const id = await quoteAndApprove("S01,S02");
+    assert.equal(await main(["submit", FILM, "--quote", id]), 0);
+    c.out.length = 0;
+    assert.equal(await main(["poll", FILM, "--json"]), 10);
+    const arr = JSON.parse(c.out.at(-1)!);
+    assert.deepEqual(arr.map((x: any) => [x.shot, x.task, x.status]), [["S01", "task_fake0001", "queued"], ["S02", "task_fake0002", "queued"]]);
+    assert.equal(await main(["poll", FILM]), 0);
+    noKey(c);
+  });
+});
+
+test("wait：第 3 次查询成功 → 下载 clip-v1.mp4、更新 state、退出 0", async () => {
+  const video = new TextEncoder().encode("REAL-ENOUGH-MP4");
+  await withFilm({ shots: ["S01"], gw: { succeedAfter: 3, video } }, async (c) => {
+    const id = await quoteAndApprove("S01");
+    assert.equal(await main(["submit", FILM, "--quote", id]), 0);
+    assert.equal(await main(["wait", FILM, "--interval", "0"]), 0);
+    const clip = join(c.dir, "shots", "S01", "clip-v1.mp4");
+    assert.deepEqual(new Uint8Array(readFileSync(clip)), video);
+    const st = readState(FILM);
+    assert.equal(st.shots.S01.clip, "shots/S01/clip-v1.mp4");
+    assert.equal(st.shots.S01.status, "generated");
+    const queries = c.gw.requests.filter((r) => r.method === "GET" && r.path === "/v1/videos/task_fake0001");
+    assert.ok(queries.length >= 3);
+    for (const r of c.gw.requests) assert.equal(r.authorization, `Bearer ${KEY}`);
+    // 已下载的任务不再查询；再 wait 立即结束
+    const before = c.gw.requests.length;
+    assert.equal(await main(["wait", FILM, "--interval", "0"]), 0);
+    assert.equal(c.gw.requests.length, before);
+    noKey(c);
+  });
+});
+
+test("wait --timeout 1：还没出完 → 退出 6", async () => {
+  await withFilm({ shots: ["S01"], gw: { succeedAfter: 100000 } }, async (c) => {
+    const id = await quoteAndApprove("S01");
+    assert.equal(await main(["submit", FILM, "--quote", id]), 0);
+    c.out.length = 0;
+    const t0 = Date.now();
+    assert.equal(await main(["wait", FILM, "--interval", "0.2", "--timeout", "1"]), 6);
+    assert.ok(Date.now() - t0 < 5000);
+    assert.equal(c.out.at(-1), "还没出完，稍后再 wait");
+    assert.equal(existsSync(join(c.dir, "shots", "S01", "clip-v1.mp4")), false);
+  });
+});
+
+test("重拍后得到 clip-v2.mp4，clip-v1.mp4 还在", async () => {
+  await withFilm({ shots: ["S01"] }, async (c) => {
+    const q1 = await quoteAndApprove("S01");
+    assert.equal(await main(["submit", FILM, "--quote", q1]), 0);
+    assert.equal(await main(["wait", FILM, "--interval", "0"]), 0);
+    const q2 = await quoteAndApprove("S01");
+    assert.notEqual(q2, q1);
+    assert.equal(await main(["submit", FILM, "--quote", q2]), 0);
+    assert.equal(await main(["fetch", FILM]), 0);
+    assert.ok(existsSync(join(c.dir, "shots", "S01", "clip-v1.mp4")));
+    assert.ok(existsSync(join(c.dir, "shots", "S01", "clip-v2.mp4")));
+    assert.equal(readState(FILM).shots.S01.clip, "shots/S01/clip-v2.mp4");
+    assert.equal(spendLines(c.dir).length, 2);
+  });
+});
+
+test("fetch：失败的任务打印原因，状态记为 failed，之后不再查询", async () => {
+  await withFilm({ shots: ["S01"], gw: { result: "fail" } }, async (c) => {
+    const id = await quoteAndApprove("S01");
+    assert.equal(await main(["submit", FILM, "--quote", id]), 0);
+    c.out.length = 0;
+    assert.equal(await main(["fetch", FILM]), 0);
+    assert.ok(c.out.includes("S01 生成失败：内容审核未通过"), c.out.join("\n"));
+    assert.equal(readState(FILM).shots.S01.status, "failed");
+    assert.equal(existsSync(join(c.dir, "shots", "S01", "clip-v1.mp4")), false);
+    const before = c.gw.requests.length;
+    assert.equal(await main(["poll", FILM]), 0);
+    assert.equal(c.gw.requests.length, before);
+  });
+});

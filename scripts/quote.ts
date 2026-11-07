@@ -6,7 +6,7 @@ import { readState } from "./lib/state.ts";
 import { writeNew } from "./lib/versioned.ts";
 import { sha256File } from "./lib/hash.ts";
 
-type Model = "mini" | "2.5";
+export type Model = "mini" | "2.5";
 
 export interface Quote {
   id: string;
@@ -21,21 +21,33 @@ export interface Quote {
   createdAt: string;
 }
 
-interface Pricing {
+export interface Pricing {
   default: Model;
-  models: Record<Model, { id: string; cnyPerSecond720p: number }>;
+  models: Record<Model, { id: string; cnyPerSecond720p: number; firstLastFrame?: boolean }>;
+}
+
+/** spend.jsonl 的一行。submit 写 {at,quote,shot,task,model,billable,cny}；结果不明时 task 为 null 且 uncertain 为 true。 */
+export interface SpendRow {
+  at?: string;
+  quote?: string;
+  shot?: string;
+  task?: string | null;
+  model?: string;
+  billable?: number;
+  cny: number;
+  uncertain?: boolean;
 }
 
 const USAGE = "用法：quote.ts <片名> --shots S01,S02 [--model mini|2.5]";
 const EPS = 1e-9;
 
 /** 价格表属于代码仓库，按本文件位置定位（与 FILM_ROOT 无关）。 */
-function readPricing(): Pricing {
+export function readPricing(): Pricing {
   const path = resolve(dirname(fileURLToPath(import.meta.url)), "..", "config", "pricing.json");
   return JSON.parse(readFileSync(path, "utf8")) as Pricing;
 }
 
-function round1(x: number): number {
+export function round1(x: number): number {
   return Math.round(x * 10) / 10;
 }
 
@@ -48,18 +60,22 @@ function listNames(dir: string): string[] {
   }
 }
 
-/** 计费秒数：向上取整；余量不足（含等于）0.5 秒再加 1 秒；最少 2 秒。秒数必须是大于 0 的有限数。 */
+/**
+ * 计费秒数：向上取整；余量不足（含等于）0.5 秒再加 1 秒；最少 4 秒。秒数必须是大于 0 的有限数。
+ * 4 秒下限：网关文档写明 seedance-2.0-mini 4–15 秒、seedance-2.5 4–30 秒，seconds 是整数，
+ * 费用 = 输出秒数 × 单价（来源见 scripts/lib/video-api.ts 顶部注释）。上限因模型而异，超了网关返回 400（不建任务、不扣费）。
+ */
 export function billableSeconds(seconds: number): number {
   if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds <= 0) {
     throw new Error(`秒数不合法：${seconds}`);
   }
   let n = Math.ceil(seconds - EPS);
   if (n - seconds <= 0.5 + EPS) n += 1;
-  return Math.max(n, 2);
+  return Math.max(n, 4);
 }
 
-/** 镜头最新（n 最大）的 pre-submit 审核文件；必须 verdict 为 pass，返回其哈希。 */
-function passedReviewHash(dir: string, shot: string): string {
+/** 镜头最新（n 最大，按数字比较）的 pre-submit 审核记录路径；没有返回 null。 */
+export function latestReviewPath(dir: string, shot: string): string | null {
   const esc = shot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const re = new RegExp(`^pre-submit-${esc}-v(\\d+)\\.json$`);
   let best = 0;
@@ -67,24 +83,29 @@ function passedReviewHash(dir: string, shot: string): string {
     const m = re.exec(name);
     if (m) best = Math.max(best, Number(m[1]));
   }
+  return best === 0 ? null : join(dir, "reviews", `pre-submit-${shot}-v${best}.json`);
+}
+
+/** 镜头最新的 pre-submit 审核文件；必须 verdict 为 pass，返回其哈希。 */
+function passedReviewHash(dir: string, shot: string): string {
   const fail = new Error(`${shot} 还没有通过提交前审核`);
-  if (best === 0) throw fail;
-  const path = join(dir, "reviews", `pre-submit-${shot}-v${best}.json`);
+  const path = latestReviewPath(dir, shot);
+  if (path === null) throw fail;
   const review = JSON.parse(readFileSync(path, "utf8")) as { verdict?: string };
   if (review.verdict !== "pass") throw fail;
   return sha256File(path);
 }
 
-/** spend.jsonl 各行 cny 之和（不四舍五入）；文件不存在为 0；坏行抛错。 */
-function spentFromLog(dir: string): number {
+/** spend.jsonl 的全部行；文件不存在为 []；坏行（不是 JSON、cny 不是非负有限数）抛错。 */
+export function readSpendRows(dir: string): SpendRow[] {
   let raw: string;
   try {
     raw = readFileSync(join(dir, "spend.jsonl"), "utf8");
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return 0;
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw err;
   }
-  let sum = 0;
+  const rows: SpendRow[] = [];
   const lines = raw.split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
     if (!lines[i].trim()) continue;
@@ -98,9 +119,14 @@ function spentFromLog(dir: string): number {
     if (typeof cny !== "number" || !Number.isFinite(cny) || cny < 0) {
       throw new Error(`spend.jsonl 第 ${i + 1} 行的 cny 不合法：${JSON.stringify(cny)}`);
     }
-    sum += cny;
+    rows.push(row as SpendRow);
   }
-  return sum;
+  return rows;
+}
+
+/** spend.jsonl 各行 cny 之和（不四舍五入）；文件不存在为 0；坏行抛错。 */
+export function spentFromLog(dir: string): number {
+  return readSpendRows(dir).reduce((a, r) => a + r.cny, 0);
 }
 
 function nextQuoteId(dir: string): string {
