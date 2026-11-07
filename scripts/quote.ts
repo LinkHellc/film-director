@@ -48,8 +48,11 @@ function listNames(dir: string): string[] {
   }
 }
 
-/** 计费秒数：向上取整；余量不足（含等于）0.5 秒再加 1 秒；最少 2 秒。 */
+/** 计费秒数：向上取整；余量不足（含等于）0.5 秒再加 1 秒；最少 2 秒。秒数必须是大于 0 的有限数。 */
 export function billableSeconds(seconds: number): number {
+  if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds <= 0) {
+    throw new Error(`秒数不合法：${seconds}`);
+  }
   let n = Math.ceil(seconds - EPS);
   if (n - seconds <= 0.5 + EPS) n += 1;
   return Math.max(n, 2);
@@ -72,7 +75,7 @@ function passedReviewHash(dir: string, shot: string): string {
   return sha256File(path);
 }
 
-/** spend.jsonl 各行 cny 之和；文件不存在为 0。 */
+/** spend.jsonl 各行 cny 之和（不四舍五入）；文件不存在为 0；坏行抛错。 */
 function spentFromLog(dir: string): number {
   let raw: string;
   try {
@@ -82,11 +85,22 @@ function spentFromLog(dir: string): number {
     throw err;
   }
   let sum = 0;
-  for (const line of raw.split(/\r?\n/)) {
-    if (!line.trim()) continue;
-    sum += Number((JSON.parse(line) as { cny: number }).cny);
+  const lines = raw.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    if (!lines[i].trim()) continue;
+    let row: { cny?: unknown } | null;
+    try {
+      row = JSON.parse(lines[i]);
+    } catch {
+      throw new Error(`spend.jsonl 第 ${i + 1} 行不是合法的 JSON`);
+    }
+    const cny = row?.cny;
+    if (typeof cny !== "number" || !Number.isFinite(cny) || cny < 0) {
+      throw new Error(`spend.jsonl 第 ${i + 1} 行的 cny 不合法：${JSON.stringify(cny)}`);
+    }
+    sum += cny;
   }
-  return round1(sum);
+  return sum;
 }
 
 function nextQuoteId(dir: string): string {
@@ -114,23 +128,34 @@ export function buildQuote(film: string, shots: string[], model?: Model): Quote 
   }
   const budget = state.settings.budgetCNY;
   if (budget === null || budget === undefined) throw new Error("还没有设总预算");
+  if (typeof budget !== "number" || !Number.isFinite(budget) || budget < 0) {
+    throw new Error(`总预算不合法：${JSON.stringify(budget)}`);
+  }
 
   const lines = shots.map((shot) => {
     const seconds = state.shots[shot].seconds;
-    return { shot, seconds, billable: billableSeconds(seconds), reviewHash: passedReviewHash(dir, shot) };
+    let billable: number;
+    try {
+      billable = billableSeconds(seconds);
+    } catch {
+      throw new Error(`${shot} 的秒数不合法：${JSON.stringify(seconds)}`);
+    }
+    return { shot, seconds, billable, reviewHash: passedReviewHash(dir, shot) };
   });
-  const totalCNY = round1(lines.reduce((a, l) => a + l.billable, 0) * price.cnyPerSecond720p);
-  const spentCNY = spentFromLog(dir);
+  const rawTotal = lines.reduce((a, l) => a + l.billable, 0) * price.cnyPerSecond720p;
+  if (!Number.isFinite(rawTotal)) throw new Error(`单价不合法：${m}`);
+  const rawSpent = spentFromLog(dir);
   return {
     id: nextQuoteId(dir),
     film,
     model: m,
     modelId: price.id,
     shots: lines,
-    totalCNY,
-    spentCNY,
+    totalCNY: round1(rawTotal),
+    spentCNY: round1(rawSpent),
     budgetCNY: budget,
-    overBudget: spentCNY + totalCNY > budget + EPS,
+    // 用未四舍五入的数比较；写成 !(<=)，任何 NaN 都算超预算（失败即关）。
+    overBudget: !(rawSpent + rawTotal <= budget + EPS),
     createdAt: new Date().toISOString(),
   };
 }

@@ -151,3 +151,57 @@ test("没设总预算、未知镜头、缺参数时退出码 2 且不写报价",
     assert.deepEqual(readdirSync(join(dir, "quotes")), []);
   });
 });
+
+test("billableSeconds：0、负数、非有限数抛错", () => {
+  assert.throws(() => billableSeconds(0), /秒数不合法/);
+  assert.throws(() => billableSeconds(-3), /秒数不合法/);
+  assert.throws(() => billableSeconds(Number.NaN), /秒数不合法/);
+  assert.throws(() => billableSeconds(Infinity), /秒数不合法/);
+});
+
+test("spend.jsonl 有坏的 cny 行：报错、退出 2、不写报价", async () => {
+  for (const bad of [{ shot: "X" }, { cny: "3" }, { cny: -1 }]) {
+    await withFilm({ budget: 100, shots: { S01: 4 } }, async (dir, out) => {
+      review(dir, "S01", 1, "pass");
+      writeFileSync(join(dir, "spend.jsonl"), JSON.stringify({ cny: 1 }) + "\n" + JSON.stringify(bad) + "\n");
+      assert.throws(() => buildQuote(FILM, ["S01"]), /spend\.jsonl 第 2 行/);
+      assert.equal(await main([FILM, "--shots", "S01"]), 2);
+      assert.match(out.at(-1)!, /spend\.jsonl 第 2 行的 cny 不合法/);
+      assert.deepEqual(readdirSync(join(dir, "quotes")), []);
+    });
+  }
+  await withFilm({ budget: 100, shots: { S01: 4 } }, async (dir, out) => {
+    review(dir, "S01", 1, "pass");
+    writeFileSync(join(dir, "spend.jsonl"), "{not json\n");
+    assert.equal(await main([FILM, "--shots", "S01"]), 2);
+    assert.match(out.at(-1)!, /spend\.jsonl 第 1 行不是合法的 JSON/);
+    assert.deepEqual(readdirSync(join(dir, "quotes")), []);
+  });
+});
+
+test("镜头秒数缺失或不是数：报错、退出 2、不写报价", async () => {
+  await withFilm({ budget: 100, shots: { S01: 4 } }, async (dir, out) => {
+    review(dir, "S01", 1, "pass");
+    const sp = join(dir, "state.json");
+    const st = JSON.parse(readFileSync(sp, "utf8"));
+    delete st.shots.S01.seconds;
+    writeFileSync(sp, JSON.stringify(st));
+    assert.throws(() => buildQuote(FILM, ["S01"]), /S01 的秒数不合法/);
+    assert.equal(await main([FILM, "--shots", "S01"]), 2);
+    assert.match(out.at(-1)!, /S01 的秒数不合法/);
+    assert.deepEqual(readdirSync(join(dir, "quotes")), []);
+  });
+});
+
+test("预算比较用未四舍五入的已花：已花 6.04 + 报价 5.0 > 预算 11", async () => {
+  await withFilm({ budget: 11, shots: { S01: 4.4, S02: 4.4 }, spent: [3, 3.04] }, async (dir, out) => {
+    review(dir, "S01", 1, "pass");
+    review(dir, "S02", 1, "pass");
+    const q = buildQuote(FILM, ["S01", "S02"]);
+    assert.equal(q.totalCNY, 5.0);
+    assert.equal(q.spentCNY, 6.0);
+    assert.equal(q.overBudget, true);
+    assert.equal(await main([FILM, "--shots", "S01,S02"]), 2);
+    assert.match(out.at(-1)!, /^超预算/);
+  });
+});
