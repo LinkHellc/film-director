@@ -1,0 +1,68 @@
+# 阶段 6：生成视频（`stage = "generate"`）
+
+## 做什么
+
+### 1. 在后台等出片
+
+`submit` 退出 0（或退出 1 但已提交了几镜）后，用 Bash 的 `run_in_background: true` 运行：
+
+`node scripts/seedance.ts wait <片名>`
+
+然后等完成通知，不要手动反复 `poll`，不要 `sleep` 轮询，同一支片子同时只跑一个 `wait`。等的时候可以做不花钱的事。收到通知后读输出：
+
+| 退出码 | 怎么做 |
+|---|---|
+| 0 | 全部结束。每镜一行："<镜头> 已下载：shots/<镜头>/clip-v<n>.mp4"或"<镜头> 生成失败：<原因>"。已下载的做第 2 步；失败的按 SKILL.md"出错处理"里"Seedance 任务失败"处理。 |
+| 6 | 超时：已出好的已下载，其余还在生成。再在后台运行一次 `wait`。 |
+| 1 | 有片段下载出错（或没设 Key）。没下载成功的任务下次 `wait` 会再下，再在后台运行一次；还不行就告诉本人。 |
+
+### 2. 逐镜抽帧放大检查
+
+视频你看不到动态，只能看帧：
+
+- 每 0.5 秒一帧：`.venv/Scripts/python scripts/py/frames.py extract films/<片名>/shots/<镜头>/clip-v<n>.mp4 films/<片名>/shots/<镜头>/clip-v<n>-frames --every 0.5`
+- 开头和结尾各 3 帧：`.venv/Scripts/python scripts/py/frames.py extract films/<片名>/shots/<镜头>/clip-v<n>.mp4 films/<片名>/shots/<镜头>/clip-v<n>-ends --around 0,<片段时长秒数> --n 3`（超过片尾会自动取最后一帧）
+- 用 Read 逐张打开放大看：和首帧、尾帧对得上吗？人数、道具数量变没变？脸变没变形？有没有凭空出现的东西、走反方向、嘴在动、越到后面越暗越冷？对照 `../pitfalls.md`。
+- 把看到的问题写进 `shots/<镜头>/check-v<n>.md`（看了哪些帧、发现什么、打算怎么处理）。
+
+### 3. 有问题怎么办（方法论原文）
+
+> 发现问题也不要马上重拍，因为重拍又得花钱，可以从下面几个方面看看能不能处理一下：
+> 1. 能不能剪掉？如果问题只出现在开头或者结尾那几帧，直接剪掉就行。
+> 2. 能不能用代码修？让 Claude 尝试一下写代码修，修不好再考虑重拍。
+> 3. 如果要重新拍就要先改提示词或者首尾帧图片，不然原样再拍一次大概率还是错的。重新拍完之后，旧片段也不要删。重拍的新片段不一定比旧的好，都留着，最后放在一起挑，都是花钱拍出来的，可以用就都用上。
+
+- 剪掉：在 `check-v<n>.md` 里记下要剪的时间段，到后期（`7-post.md`）拼接前剪。
+- 代码修：写 ffmpeg/Python 代码修，结果存到 `post/` 下的新文件（如 `post/S03-fix-v1.mkv`），不改原片段；做法见 `7-post.md`"拼接前的单段处理"。
+- 重拍：只拍这一镜。先改提示词（`prompt-v<n+1>.txt`）或首尾帧（回 `4-keyframes.md`，改图先问本人），重新审 `pre-submit`，再照 `5-prompts.md` 第 4–6 步报价、问 G4、批准、提交、后台 `wait`。G4 说明里写明是重拍、为什么、改了什么。旧片段保留，新片段是 `clip-v<n+1>.mp4`。
+- 声音：mini 自带的音效经常能直接用；2.5 就算写了"没有音乐"有时也会混进音乐，这种不要用，音效后期另外加。声音你听不到，交给本人在 G5 听。
+
+### 4. 剩下的镜头
+
+试拍的镜头行得通，就照 `5-prompts.md` 第 4–6 步给其余 `ready` 的镜头报价（可以一批），问 G4，批准后提交、后台 `wait`，回到本文件第 2 步。
+
+### 5. 问 G5
+
+所有镜头都有一版检查过、能剪的标好、能修的修好以后，按 `../gates.md` 的 G5 问本人，附每镜最新的片段（修过的附修好的版本）。说明里必须写"我没看过动态、没听过声音"。
+
+## 欠费（`submit` 退出 4）
+
+规矩 7：不充值，不买额度。接口返回欠费就停，把已有的片段先粗剪给本人看。
+
+1. 不再提交，不重试。
+2. 写清单 `post/rough-v<n>.txt`：按镜头顺序，每行一个已下载片段的路径（相对清单所在目录，如 `../shots/S01/clip-v1.mp4`）。
+3. `.venv/Scripts/python scripts/py/post.py concat films/<片名>/post/rough-v<n>.txt films/<片名>/out/rough-v<n>.mp4`
+4. 告诉本人：网关说余额或额度不足；已提交哪几镜、没提交哪几镜；已花多少（`quote.ts` 下次报价会显示，或看 `state.spentCNY`）；粗剪在 `out/rough-v<n>.mp4`；我没看过动态、没听过声音。然后停下，等本人说怎么办。
+
+## 产物
+
+- `shots/<镜头>/clip-v<n>.mp4`：片段（`seedance.ts` 下载，编号自动递增，旧片段保留）
+- `shots/<镜头>/clip-v<n>-frames/`、`shots/<镜头>/clip-v<n>-ends/`：抽出的帧
+- `shots/<镜头>/check-v<n>.md`：检查记录
+- `post/rough-v<n>.txt`、`out/rough-v<n>.mp4`：欠费时的粗剪
+
+## 完成后 `state` 怎么改
+
+- 下载后脚本把镜头 `status` 改成 `"generated"`（失败为 `"failed"`）、`clip` 写成片段路径。
+- G5 选"都可以"：这些镜头 `status = "accepted"`；全部 accepted → `gates.G5 = "approved"`，`stage = "post"`，打开 `7-post.md`。
+- 重拍的镜头：新提示词审核通过后 `status = "ready"`，提交后脚本改成 `"generating"`。
