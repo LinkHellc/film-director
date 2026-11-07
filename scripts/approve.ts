@@ -30,14 +30,21 @@ function readOrNull(path: string): string | null {
   }
 }
 
+/** 出现任何一个就不算批准：否定、拒绝、撤回、拖延、疑问。 */
+const NOT_APPROVING = ["不", "别", "勿", "没", "未", "拒", "取消", "暂缓", "撤", "等", "再说", "？", "?", "吗"];
+
 /**
- * 原话里要有 "批准 Q3"（半角空格），且后面不能紧跟数字（"批准 Q31" 不算 Q3）；
- * "批准" 前 3 个字以内出现 不/别/勿/没/未 的不算（"不批准"、"先不要批准"、"别急着批准"）。
- * 宁可错拒（如"不错，批准 Q3"会被拒），不可错收。
+ * 只认两种回答（"批准" 和报价号之间是半角空格）：
+ * 1. 恰好是 G4 选项原文 `批准 Q3（¥1.5）`（允许首尾空白）；
+ * 2. 以 `批准 Q3` 开头（后面不能紧跟数字，"批准 Q31" 不算 Q3），且全文不含 NOT_APPROVING 里的任何字样。
+ * 宁可错拒（如"不错，批准 Q3"会被拒），不可错收。只回一个数字（选项编号）不算批准。
  */
 export function saidApproves(said: string, quoteId: string): boolean {
   assertQuoteId(quoteId);
-  return new RegExp(`(?<![不别勿没未][^]{0,2})批准 ${quoteId}(?!\\d)`).test(said);
+  if (typeof said !== "string") return false;
+  const s = said.trim();
+  if (new RegExp(`^批准 ${quoteId}（¥[0-9.]+）$`).test(s)) return true;
+  return new RegExp(`^批准 ${quoteId}(?!\\d)`).test(s) && !NOT_APPROVING.some((w) => s.includes(w));
 }
 
 /** 读 approvals/<报价号>.json；没有批准过返回 null。报价号不合法时抛错。 */

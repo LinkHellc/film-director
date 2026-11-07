@@ -63,7 +63,7 @@ function approvals(dir: string): string[] {
 test("成功：写 approvals/Q3.json，打印已记下批准，readApproval 能读回", async () => {
   await withFilm(async (dir, out) => {
     const q = writeQuote(dir, "Q3");
-    const said = "好的，批准 Q3，开始生成吧";
+    const said = "批准 Q3，开始生成吧";
     assert.equal(await main([FILM, "Q3", "--said", said]), 0);
     assert.equal(out.at(-1), "已记下批准：Q3 ¥5.0");
     const a = JSON.parse(readFileSync(join(dir, "approvals", "Q3.json"), "utf8"));
@@ -120,7 +120,8 @@ test("Q3 与 Q31：“批准 Q31” 不能批准 Q3，“批准 Q3” 不能批�
     assert.equal(await main([FILM, "Q31", "--said", "批准 Q3"]), 1);
     assert.equal(out.at(-1), '本人原话里没有"批准 Q31"');
     assert.deepEqual(approvals(dir), []);
-    assert.equal(await main([FILM, "Q3", "--said", "批准 Q31，也批准 Q3。"]), 0);
+    assert.equal(await main([FILM, "Q3", "--said", "批准 Q31，也批准 Q3。"]), 1);
+    assert.equal(await main([FILM, "Q3", "--said", "批准 Q3"]), 0);
     assert.equal(await main([FILM, "Q31", "--said", "批准 Q31"]), 0);
     assert.deepEqual(approvals(dir).sort(), ["Q3.json", "Q31.json"]);
   });
@@ -131,7 +132,7 @@ test("已经批准过：退出 1，原批准文件不变", async () => {
     writeQuote(dir, "Q3");
     assert.equal(await main([FILM, "Q3", "--said", "批准 Q3"]), 0);
     const before = readFileSync(join(dir, "approvals", "Q3.json"), "utf8");
-    assert.equal(await main([FILM, "Q3", "--said", "再次批准 Q3"]), 1);
+    assert.equal(await main([FILM, "Q3", "--said", "批准 Q3（¥5）"]), 1);
     assert.equal(out.at(-1), "报价 Q3 已经批准过");
     assert.equal(readFileSync(join(dir, "approvals", "Q3.json"), "utf8"), before);
   });
@@ -181,4 +182,37 @@ test("卡片选项原文“批准 Q3（¥1.5）”可以批准", async () => {
     assert.equal(await main([FILM, "Q3", "--said", "批准 Q3（¥1.5）"]), 0);
     assert.deepEqual(approvals(dir), ["Q3.json"]);
   });
+});
+
+test("I3：自我否定、疑问、拖延或别的报价号一律拒绝", async () => {
+  await withFilm(async (dir, out) => {
+    writeQuote(dir, "Q3");
+    for (const said of [
+      "拒绝批准 Q3",
+      "取消批准 Q3",
+      "暂缓批准 Q3",
+      "先等等再批准 Q3",
+      "批准 Q3？",
+      "能批准 Q3 吗",
+      "不批准 Q3",
+      "别批准 Q3",
+      "批准 Q31",
+      "批准 Q3 吗",
+      "批准 Q3，不对，先别",
+      "批准 Q3?",
+      "3",
+      "好的，批准 Q3",
+    ]) {
+      assert.equal(await main([FILM, "Q3", "--said", said]), 1, said);
+      assert.equal(out.at(-1), '本人原话里没有"批准 Q3"');
+    }
+    assert.deepEqual(approvals(dir), []);
+  });
+});
+
+test("I3：选项原文（允许首尾空白）和以“批准 Q3”开头的明确回答可以批准", async () => {
+  const { saidApproves } = await import("../scripts/approve.ts");
+  for (const said of ["批准 Q3（¥1.5）", "批准 Q3", "  批准 Q3（¥0.75）  ", "批准 Q3，开始吧"]) {
+    assert.ok(saidApproves(said, "Q3"), said);
+  }
 });
