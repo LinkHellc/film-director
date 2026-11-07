@@ -202,7 +202,7 @@ function needKey(): boolean {
 }
 
 /** 追加一行 JSON；原文件末尾没有换行时先补一个。 */
-function appendJsonl(path: string, row: object): void {
+function appendJsonlImpl(path: string, row: object): void {
   let prefix = "";
   try {
     const cur = readFileSync(path, "utf8");
@@ -213,12 +213,22 @@ function appendJsonl(path: string, row: object): void {
   appendFileSync(path, prefix + JSON.stringify(row) + "\n");
 }
 
-function updateShot(film: string, shot: string, patch: { status?: string; clip?: string }, spent?: number): void {
+function updateShotImpl(film: string, shot: string, patch: { status?: string; clip?: string }, spent?: number): void {
   const st = readState(film);
   if (Object.hasOwn(st.shots, shot)) Object.assign(st.shots[shot], patch);
   if (spent !== undefined) st.spentCNY = spent;
   writeState(st);
 }
+
+/** 写记账文件和 state.json 的入口；测试里可以替换成会失败的版本。 */
+export const io = {
+  appendJsonl: appendJsonlImpl,
+  updateShot: (film: string, shot: string, patch: { status?: string; clip?: string }, spent?: number): void =>
+    updateShotImpl(film, shot, patch, spent),
+};
+
+/** 记账失败、但钱可能已经花了：退出 7，锁留着，等本人核对。 */
+const EXIT_UNRECORDED = 7;
 
 async function submit(args: string[]): Promise<number> {
   const [film, ...rest] = args;
@@ -239,12 +249,13 @@ async function submit(args: string[]): Promise<number> {
 
   // 一次只允许一个提交：先占锁，再查闸门，查完到发完都在锁里
   const lock = join(dir, LOCK);
+  const lockShown = `films/${film}/${LOCK}`;
   try {
     writeNew(lock, JSON.stringify({ pid: process.pid, quote: quoteId, at: new Date().toISOString() }));
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code === "EEXIST") {
-      console.error(`另一个提交正在进行（films/${film}/${LOCK}）；确认没有在提交后删掉这个文件再试`);
+      console.error(`另一个提交正在进行（${lockShown}）；确认没有在提交、并核对过网关任务日志和 spend.jsonl 后，删掉这个文件再试`);
       return 1;
     }
     if (code === "ENOENT") {
@@ -253,6 +264,21 @@ async function submit(args: string[]): Promise<number> {
     }
     throw err;
   }
+  let keepLock = false;
+  /** 记账失败时的统一处理：说清楚任务号、镜头、金额，保留锁。 */
+  const unrecorded = (shot: string, task: string | null, cny: number, row: object, err: unknown): number => {
+    keepLock = true;
+    console.error(
+      `${shot} ${task ? `已经在网关建了任务 ${task}` : "的提交结果不明，可能已经建了任务"}（约 ¥${cny.toFixed(2)}），` +
+        `但写 spend.jsonl 失败（${scrub((err as Error).message)}）。`,
+    );
+    console.error(`应补记的一行：${JSON.stringify(row)}`);
+    console.error(
+      `已停止，其余镜头没有提交；锁 ${lockShown} 保留着。请先到网关的任务日志核对这个任务，` +
+        "把上面这行补进 spend.jsonl，再删掉锁；不要直接重新提交。",
+    );
+    return EXIT_UNRECORDED;
+  };
   try {
     const reasons = checkGates(film, quoteId);
     if (reasons.length > 0) {
@@ -268,23 +294,23 @@ async function submit(args: string[]): Promise<number> {
     for (const line of q.shots) {
       const shot = line.shot;
       const cny = line.billable * price.cnyPerSecond720p;
-      const row = { at: "", quote: quoteId, shot, task: null as string | null, model: price.id, billable: line.billable, cny };
+      const base = { quote: quoteId, shot, model: price.id, billable: line.billable, cny };
+
+      // 1) 建任务：这里的失败都还没花钱，或者花没花不确定
+      let task: string;
       try {
         const prompt = readFileSync(latestShotFile(dir, shot, "prompt", "txt")!, "utf8").trim();
-        const { id } = await createTask({
-          model: price.id,
-          prompt,
-          firstFrame: latestShotFile(dir, shot, "first", "png")!,
-          lastFrame: latestShotFile(dir, shot, "last", "png")!,
-          seconds: line.billable,
-          resolution: "720p",
-          aspectRatio: aspect,
-        });
-        appendJsonl(spendPath, { ...row, at: new Date().toISOString(), task: id });
-        updateShot(film, shot, { status: "generating" }, spentFromLog(dir));
-        n++;
-        total += cny;
-        console.log(`已提交 ${shot}：${id}（${line.billable} 秒，约 ¥${cny.toFixed(2)}）`);
+        task = (
+          await createTask({
+            model: price.id,
+            prompt,
+            firstFrame: latestShotFile(dir, shot, "first", "png")!,
+            lastFrame: latestShotFile(dir, shot, "last", "png")!,
+            seconds: line.billable,
+            resolution: "720p",
+            aspectRatio: aspect,
+          })
+        ).id;
       } catch (err) {
         if (err instanceof ArrearsError) {
           console.error(`网关说余额或额度不足：${scrub(err.message)}`);
@@ -293,8 +319,17 @@ async function submit(args: string[]): Promise<number> {
         }
         if (err instanceof GatewayError && err.uncertain) {
           // 不知道建没建成：按可能已扣费记账（预算照算、这份报价不能再提交），不重发
-          appendJsonl(spendPath, { ...row, at: new Date().toISOString(), uncertain: true });
-          updateShot(film, shot, {}, spentFromLog(dir));
+          const row = { at: new Date().toISOString(), ...base, task: null, uncertain: true };
+          try {
+            io.appendJsonl(spendPath, row);
+          } catch (e) {
+            return unrecorded(shot, null, cny, row, e);
+          }
+          try {
+            io.updateShot(film, shot, {}, spentFromLog(dir));
+          } catch (e) {
+            console.error(`警告：spend.jsonl 已记账，但 state.json 没有更新（${scrub((e as Error).message)}）`);
+          }
           console.error(
             `${shot} 提交结果不明（${scrub(err.message)}）：可能已经建了任务并扣费，已按 ¥${cny.toFixed(2)} 记入 spend.jsonl。` +
               "请到网关的任务日志核对，不要直接重发。",
@@ -311,14 +346,33 @@ async function submit(args: string[]): Promise<number> {
         console.error(`已提交 ${n} 镜，其余未提交`);
         return 1;
       }
+
+      // 2) 任务已建好、钱已花：先记账，记不上就停下、留锁
+      const row = { at: new Date().toISOString(), ...base, task };
+      try {
+        io.appendJsonl(spendPath, row);
+      } catch (err) {
+        return unrecorded(shot, task, cny, row, err);
+      }
+      n++;
+      total += cny;
+      // 3) 更新 state.json：失败只警告（spend.jsonl 才是账本，闸门按它算）
+      try {
+        io.updateShot(film, shot, { status: "generating" }, spentFromLog(dir));
+      } catch (err) {
+        console.error(`警告：${shot} 已提交并记账，但 state.json 没有更新（${scrub((err as Error).message)}）`);
+      }
+      console.log(`已提交 ${shot}：${task}（${line.billable} 秒，约 ¥${cny.toFixed(2)}）`);
     }
     console.log(`已提交 ${n} 镜，约 ¥${round1(total).toFixed(1)}（估算，以账单为准）；用 wait 等出片`);
     return 0;
   } finally {
-    try {
-      unlinkSync(lock);
-    } catch {
-      /* 锁已不在 */
+    if (!keepLock) {
+      try {
+        unlinkSync(lock);
+      } catch {
+        /* 锁已不在 */
+      }
     }
   }
 }
@@ -372,14 +426,34 @@ function pendingTasks(dir: string): Pending[] {
   return out;
 }
 
-async function pollOnce(dir: string): Promise<PollResult[]> {
+/** 同一个任务在一次 wait 里连续查询出错这么多次，就当失败结束，不再拖住整片。 */
+const MAX_QUERY_ERRORS = 5;
+
+/**
+ * 查一遍所有待查任务。查询返回 404/410（网关上没有这个任务）直接算失败；
+ * 传入 errCounts（wait 用）时，同一任务连续出错 MAX_QUERY_ERRORS 次也算失败；其他出错为 unknown（没结束）。
+ */
+async function pollOnce(dir: string, errCounts?: Map<string, number>): Promise<PollResult[]> {
   const out: PollResult[] = [];
   for (const p of pendingTasks(dir)) {
     try {
       out.push({ ...p, ...(await getTask(p.task)) });
+      errCounts?.delete(p.task);
     } catch (err) {
       if (err instanceof MissingKeyError) throw err;
-      out.push({ ...p, status: "unknown", error: scrub((err as Error).message) });
+      const msg = scrub((err as Error).message);
+      const status = err instanceof GatewayError ? err.status : null;
+      if (status === 404 || status === 410) {
+        out.push({ ...p, status: "failed", error: `网关上找不到这个任务（${msg}）` });
+        continue;
+      }
+      const n = (errCounts?.get(p.task) ?? 0) + 1;
+      errCounts?.set(p.task, n);
+      if (errCounts && n >= MAX_QUERY_ERRORS) {
+        out.push({ ...p, status: "failed", error: `连续 ${n} 次查询出错（${msg}）` });
+      } else {
+        out.push({ ...p, status: "unknown", error: msg });
+      }
     }
   }
   return out;
@@ -427,12 +501,15 @@ async function poll(args: string[]): Promise<number> {
   return unfinished(results) ? 10 : 0;
 }
 
-/** 下载成功的、记下失败的；还在跑的跳过。返回 0，有下载出错返回 1。 */
-async function fetchAll(film: string): Promise<number> {
+/**
+ * 下载成功的、记下失败的（写 fetched.jsonl，之后不再查询）；还在跑的跳过。
+ * results 不传就现查一遍。返回 0；有下载出错返回 1。生成失败不影响返回值（原因已打印并记录）。
+ */
+async function fetchAll(film: string, results?: PollResult[]): Promise<number> {
   const dir = filmDir(film);
   const fetchedPath = join(dir, "fetched.jsonl");
   let code = 0;
-  for (const r of await pollOnce(dir)) {
+  for (const r of results ?? (await pollOnce(dir))) {
     if (r.status === "succeeded") {
       const shotDir = join(dir, "shots", r.shot);
       mkdirSync(shotDir, { recursive: true });
@@ -445,13 +522,13 @@ async function fetchAll(film: string): Promise<number> {
         continue;
       }
       const clip = rel(dir, dest);
-      appendJsonl(fetchedPath, { at: new Date().toISOString(), task: r.task, shot: r.shot, status: "downloaded", clip });
-      updateShot(film, r.shot, { status: "generated", clip });
+      io.appendJsonl(fetchedPath, { at: new Date().toISOString(), task: r.task, shot: r.shot, status: "downloaded", clip });
+      io.updateShot(film, r.shot, { status: "generated", clip });
       console.log(`${r.shot} 已下载：${clip}`);
     } else if (r.status === "failed") {
       const why = r.error || "失败";
-      appendJsonl(fetchedPath, { at: new Date().toISOString(), task: r.task, shot: r.shot, status: "failed", error: why });
-      updateShot(film, r.shot, { status: "failed" });
+      io.appendJsonl(fetchedPath, { at: new Date().toISOString(), task: r.task, shot: r.shot, status: "failed", error: why });
+      io.updateShot(film, r.shot, { status: "failed" });
       console.error(`${r.shot} 生成失败：${why}`);
     } else {
       console.log(`${r.shot} ${r.task}：${LABEL[r.status]}${r.error ? `：${r.error}` : ""}`);
@@ -484,11 +561,15 @@ async function wait(args: string[]): Promise<number> {
   if (!needKey()) return 1;
   const dir = filmDir(film);
   const deadline = Date.now() + timeout * 1000;
+  const errCounts = new Map<string, number>();
   for (;;) {
-    const results = await pollOnce(dir);
-    if (!unfinished(results)) return fetchAll(film);
+    const results = await pollOnce(dir, errCounts);
+    // 全部结束：下载并记录，退出 0（个别镜头生成失败也是 0，原因已打印并写进 fetched.jsonl）
+    if (!unfinished(results)) return fetchAll(film, results);
     const left = deadline - Date.now();
     if (left <= 0) {
+      // 超时也先把已经出好的下载下来、把失败的记下
+      await fetchAll(film, results);
       console.log("还没出完，稍后再 wait");
       return 6;
     }

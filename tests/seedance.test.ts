@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { checkGates, main } from "../scripts/seedance.ts";
+import { checkGates, io, main } from "../scripts/seedance.ts";
 import { main as quote } from "../scripts/quote.ts";
 import { main as approve } from "../scripts/approve.ts";
 import { sha256File } from "../scripts/lib/hash.ts";
@@ -436,5 +436,94 @@ test("fetch：失败的任务打印原因，状态记为 failed，之后不再�
     const before = c.gw.requests.length;
     assert.equal(await main(["poll", FILM]), 0);
     assert.equal(c.gw.requests.length, before);
+  });
+});
+
+// ---------- 复审修复 ----------
+
+test("建好任务后记账失败：打印任务号，保留锁，退出 7；再提交被锁挡住，网关只收到 1 个 POST", async () => {
+  await withFilm({}, async (c) => {
+    const id = await quoteAndApprove("S01,S02");
+    const real = io.appendJsonl;
+    io.appendJsonl = () => {
+      throw Object.assign(new Error("EBUSY: resource busy or locked"), { code: "EBUSY" });
+    };
+    try {
+      c.out.length = 0;
+      assert.equal(await main(["submit", FILM, "--quote", id]), 7);
+    } finally {
+      io.appendJsonl = real;
+    }
+    const text = c.out.join("\n");
+    assert.match(text, /task_fake0001/);
+    assert.match(text, /S01/);
+    assert.match(text, /¥0\.75/);
+    assert.match(text, /任务日志/);
+    assert.ok(existsSync(join(c.dir, ".submit.lock")), "锁应该还在");
+    assert.equal(await main(["submit", FILM, "--quote", id]), 1);
+    assert.match(c.out.at(-1)!, /另一个提交正在进行/);
+    assert.equal(c.gw.creates().length, 1);
+    noKey(c);
+  });
+});
+
+test("记账成功但 state.json 更新失败：这一镜算提交成功，只给警告，继续下一镜", async () => {
+  await withFilm({}, async (c) => {
+    const id = await quoteAndApprove("S01,S02");
+    const real = io.updateShot;
+    io.updateShot = () => {
+      throw new Error("EPERM: operation not permitted");
+    };
+    try {
+      c.out.length = 0;
+      assert.equal(await main(["submit", FILM, "--quote", id]), 0);
+    } finally {
+      io.updateShot = real;
+    }
+    assert.equal(spendLines(c.dir).length, 2);
+    assert.ok(c.out.some((l) => /S01/.test(l) && /state\.json 没有更新/.test(l)), c.out.join("\n"));
+    assert.ok(c.out.some((l) => l.startsWith("已提交 S01：task_fake0001")));
+    assert.equal(existsSync(join(c.dir, ".submit.lock")), false);
+  });
+});
+
+test("wait：一个任务查询 404、一个成功 → 下载成功的、把 404 的记为失败、退出 0", async () => {
+  await withFilm({ gw: { vanish: ["task_fake0002"] } }, async (c) => {
+    const id = await quoteAndApprove("S01,S02");
+    assert.equal(await main(["submit", FILM, "--quote", id]), 0);
+    c.out.length = 0;
+    assert.equal(await main(["wait", FILM, "--interval", "0", "--timeout", "30"]), 0);
+    assert.ok(existsSync(join(c.dir, "shots", "S01", "clip-v1.mp4")));
+    const done = readFileSync(join(c.dir, "fetched.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const lost = done.find((r) => r.task === "task_fake0002");
+    assert.equal(lost.status, "failed");
+    assert.match(lost.error, /404/);
+    assert.equal(readState(FILM).shots.S02.status, "failed");
+    assert.ok(c.out.some((l) => l.startsWith("S02 生成失败：")), c.out.join("\n"));
+  });
+});
+
+test("wait：同一任务连续 5 次查询出错 → 记为失败，不再拖住整片", async () => {
+  await withFilm({ gw: { queryErrors: ["task_fake0001"] } }, async (c) => {
+    const id = await quoteAndApprove("S01,S02");
+    assert.equal(await main(["submit", FILM, "--quote", id]), 0);
+    assert.equal(await main(["wait", FILM, "--interval", "0", "--timeout", "30"]), 0);
+    const q1 = c.gw.requests.filter((r) => r.method === "GET" && r.path === "/v1/videos/task_fake0001");
+    assert.equal(q1.length, 5);
+    assert.ok(existsSync(join(c.dir, "shots", "S02", "clip-v1.mp4")));
+    assert.equal(readState(FILM).shots.S01.status, "failed");
+  });
+});
+
+test("wait 超时时也把已经出好的片段下载下来，再退出 6", async () => {
+  await withFilm({ gw: { stuck: ["task_fake0002"] } }, async (c) => {
+    const id = await quoteAndApprove("S01,S02");
+    assert.equal(await main(["submit", FILM, "--quote", id]), 0);
+    c.out.length = 0;
+    assert.equal(await main(["wait", FILM, "--interval", "0.2", "--timeout", "1"]), 6);
+    assert.equal(c.out.at(-1), "还没出完，稍后再 wait");
+    assert.ok(existsSync(join(c.dir, "shots", "S01", "clip-v1.mp4")));
+    assert.equal(readState(FILM).shots.S01.clip, "shots/S01/clip-v1.mp4");
+    assert.equal(readState(FILM).shots.S02.status, "generating");
   });
 });

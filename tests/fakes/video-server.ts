@@ -22,6 +22,12 @@ export interface VideoServerOptions {
   creates?: CreateMode[];
   /** 每个任务第几次查询变成 completed（默认 1）。 */
   succeedAfter?: number;
+  /** 这些任务查询时一直返回 404（任务丢了）。 */
+  vanish?: string[];
+  /** 这些任务查询时一直返回 500。 */
+  queryErrors?: string[];
+  /** 这些任务一直在生成，永远不结束。 */
+  stuck?: string[];
   /** 任务的最终结果（默认 ok）。 */
   result?: "ok" | "fail";
   /** 下载返回的视频内容。 */
@@ -113,9 +119,12 @@ export async function startVideoServer(options: VideoServerOptions = {}): Promis
     const m = /^\/v1\/videos\/([^/]+)(\/content)?$/.exec(path);
     if (req.method === "GET" && m) {
       const id = decodeURIComponent(m[1]);
+      if (options.vanish?.includes(id)) return send(res, 404, { error: { message: "task not found", code: "not_found" } });
+      if (!m[2] && options.queryErrors?.includes(id)) return send(res, 500, { error: { message: "upstream busy", code: "internal" } });
       const t = tasks.get(id);
       if (!t) return send(res, 404, { error: { message: "task not found", code: "not_found" } });
-      const done = t.queries >= (options.succeedAfter ?? 1);
+      const stuck = options.stuck?.includes(id) ?? false;
+      const done = !stuck && t.queries >= (options.succeedAfter ?? 1);
       if (m[2]) {
         if (!done || options.result === "fail") return send(res, 400, { error: { message: "video not ready", code: "not_ready" } });
         res.writeHead(200, { "content-type": "video/mp4" });
@@ -123,7 +132,7 @@ export async function startVideoServer(options: VideoServerOptions = {}): Promis
         return;
       }
       t.queries++;
-      const finished = t.queries >= (options.succeedAfter ?? 1);
+      const finished = !stuck && t.queries >= (options.succeedAfter ?? 1);
       if (!finished) return send(res, 200, { id, object: "video", status: t.queries === 1 ? "queued" : "in_progress", progress: 50 });
       if (options.result === "fail") {
         return send(res, 200, { id, object: "video", status: "failed", progress: 100, error: { message: "内容审核未通过", code: "content_policy" } });
