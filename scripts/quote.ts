@@ -1,0 +1,182 @@
+import { readFileSync, readdirSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { filmDir } from "./lib/paths.ts";
+import { readState } from "./lib/state.ts";
+import { writeNew } from "./lib/versioned.ts";
+import { sha256File } from "./lib/hash.ts";
+
+type Model = "mini" | "2.5";
+
+export interface Quote {
+  id: string;
+  film: string;
+  model: Model;
+  modelId: string;
+  shots: { shot: string; seconds: number; billable: number; reviewHash: string }[];
+  totalCNY: number;
+  spentCNY: number;
+  budgetCNY: number;
+  overBudget: boolean;
+  createdAt: string;
+}
+
+interface Pricing {
+  default: Model;
+  models: Record<Model, { id: string; cnyPerSecond720p: number }>;
+}
+
+const USAGE = "用法：quote.ts <片名> --shots S01,S02 [--model mini|2.5]";
+const EPS = 1e-9;
+
+/** 价格表属于代码仓库，按本文件位置定位（与 FILM_ROOT 无关）。 */
+function readPricing(): Pricing {
+  const path = resolve(dirname(fileURLToPath(import.meta.url)), "..", "config", "pricing.json");
+  return JSON.parse(readFileSync(path, "utf8")) as Pricing;
+}
+
+function round1(x: number): number {
+  return Math.round(x * 10) / 10;
+}
+
+function listNames(dir: string): string[] {
+  try {
+    return readdirSync(dir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw err;
+  }
+}
+
+/** 计费秒数：向上取整；余量不足（含等于）0.5 秒再加 1 秒；最少 2 秒。 */
+export function billableSeconds(seconds: number): number {
+  let n = Math.ceil(seconds - EPS);
+  if (n - seconds <= 0.5 + EPS) n += 1;
+  return Math.max(n, 2);
+}
+
+/** 镜头最新（n 最大）的 pre-submit 审核文件；必须 verdict 为 pass，返回其哈希。 */
+function passedReviewHash(dir: string, shot: string): string {
+  const esc = shot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`^pre-submit-${esc}-v(\\d+)\\.json$`);
+  let best = 0;
+  for (const name of listNames(join(dir, "reviews"))) {
+    const m = re.exec(name);
+    if (m) best = Math.max(best, Number(m[1]));
+  }
+  const fail = new Error(`${shot} 还没有通过提交前审核`);
+  if (best === 0) throw fail;
+  const path = join(dir, "reviews", `pre-submit-${shot}-v${best}.json`);
+  const review = JSON.parse(readFileSync(path, "utf8")) as { verdict?: string };
+  if (review.verdict !== "pass") throw fail;
+  return sha256File(path);
+}
+
+/** spend.jsonl 各行 cny 之和；文件不存在为 0。 */
+function spentFromLog(dir: string): number {
+  let raw: string;
+  try {
+    raw = readFileSync(join(dir, "spend.jsonl"), "utf8");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") return 0;
+    throw err;
+  }
+  let sum = 0;
+  for (const line of raw.split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    sum += Number((JSON.parse(line) as { cny: number }).cny);
+  }
+  return round1(sum);
+}
+
+function nextQuoteId(dir: string): string {
+  let max = 0;
+  for (const name of listNames(join(dir, "quotes"))) {
+    const m = /^Q(\d+)\.json$/.exec(name);
+    if (m) max = Math.max(max, Number(m[1]));
+  }
+  return `Q${max + 1}`;
+}
+
+export function buildQuote(film: string, shots: string[], model?: Model): Quote {
+  const dir = filmDir(film);
+  const state = readState(film);
+  const pricing = readPricing();
+  const m: Model = model ?? state.settings.model ?? pricing.default;
+  const price = pricing.models[m];
+  if (!price) throw new Error(`没有这个模型：${m}`);
+  if (shots.length === 0) throw new Error("没有指定镜头");
+  const seen = new Set<string>();
+  for (const s of shots) {
+    if (seen.has(s)) throw new Error(`镜头重复：${s}`);
+    seen.add(s);
+    if (!Object.hasOwn(state.shots, s)) throw new Error(`没有这个镜头：${s}`);
+  }
+  const budget = state.settings.budgetCNY;
+  if (budget === null || budget === undefined) throw new Error("还没有设总预算");
+
+  const lines = shots.map((shot) => {
+    const seconds = state.shots[shot].seconds;
+    return { shot, seconds, billable: billableSeconds(seconds), reviewHash: passedReviewHash(dir, shot) };
+  });
+  const totalCNY = round1(lines.reduce((a, l) => a + l.billable, 0) * price.cnyPerSecond720p);
+  const spentCNY = spentFromLog(dir);
+  return {
+    id: nextQuoteId(dir),
+    film,
+    model: m,
+    modelId: price.id,
+    shots: lines,
+    totalCNY,
+    spentCNY,
+    budgetCNY: budget,
+    overBudget: spentCNY + totalCNY > budget + EPS,
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function human(p: string): string {
+  return p.replace(/\\/g, "/");
+}
+
+export async function main(argv: string[]): Promise<number> {
+  const [film, ...rest] = argv;
+  let shotsArg: string | undefined;
+  let modelArg: string | undefined;
+  for (let i = 0; i < rest.length; i++) {
+    if (rest[i] === "--shots") shotsArg = rest[++i];
+    else if (rest[i] === "--model") modelArg = rest[++i];
+    else {
+      console.error(USAGE);
+      return 2;
+    }
+  }
+  if (!film || !shotsArg || (modelArg !== undefined && modelArg !== "mini" && modelArg !== "2.5")) {
+    console.error(USAGE);
+    return 2;
+  }
+  const shots = shotsArg.split(",").map((s) => s.trim()).filter(Boolean);
+
+  let q: Quote;
+  try {
+    q = buildQuote(film, shots, modelArg as Model | undefined);
+  } catch (err) {
+    console.error((err as Error).message);
+    return 2;
+  }
+  const path = join(filmDir(film), "quotes", `${q.id}.json`);
+  writeNew(path, JSON.stringify(q, null, 2) + "\n");
+
+  const secs = q.shots.reduce((a, s) => a + s.billable, 0);
+  const sentence =
+    `报价 ${q.id}：${q.shots.length} 镜 ${secs} 秒 ${q.model} 约 ¥${q.totalCNY.toFixed(1)}（估算，以账单为准）；` +
+    `已花 ¥${q.spentCNY.toFixed(1)}，预算余 ¥${round1(q.budgetCNY - q.spentCNY).toFixed(1)}`;
+  if (q.overBudget) {
+    console.error(`超预算：${sentence}（已写 ${human(path)}，不能提交）`);
+    return 2;
+  }
+  console.log(sentence);
+  return 0;
+}
+
+if (import.meta.main) process.exit(await main(process.argv.slice(2)));
