@@ -23,7 +23,8 @@ export interface Quote {
 
 export interface Pricing {
   default: Model;
-  models: Record<Model, { id: string; cnyPerSecond720p: number; firstLastFrame?: boolean }>;
+  /** maxSeconds：网关单镜最长秒数（mini 15、2.5 30，来源见 scripts/lib/video-api.ts 顶部注释）。 */
+  models: Record<Model, { id: string; cnyPerSecond720p: number; firstLastFrame?: boolean; maxSeconds?: number }>;
 }
 
 /** spend.jsonl 的一行。submit 写 {at,quote,shot,task,model,billable,cny}；结果不明时 task 为 null 且 uncertain 为 true。 */
@@ -63,7 +64,7 @@ function listNames(dir: string): string[] {
 /**
  * 计费秒数：向上取整；余量不足（含等于）0.5 秒再加 1 秒；最少 4 秒。秒数必须是大于 0 的有限数。
  * 4 秒下限：网关文档写明 seedance-2.0-mini 4–15 秒、seedance-2.5 4–30 秒，seconds 是整数，
- * 费用 = 输出秒数 × 单价（来源见 scripts/lib/video-api.ts 顶部注释）。上限因模型而异，超了网关返回 400（不建任务、不扣费）。
+ * 费用 = 输出秒数 × 单价（来源见 scripts/lib/video-api.ts 顶部注释）。上限因模型而异（pricing.json 的 maxSeconds），buildQuote 检查。
  */
 export function billableSeconds(seconds: number): number {
   if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds <= 0) {
@@ -145,6 +146,12 @@ export function buildQuote(film: string, shots: string[], model?: Model): Quote 
   const m: Model = model ?? state.settings.model ?? pricing.default;
   const price = pricing.models[m];
   if (!price) throw new Error(`没有这个模型：${m}`);
+  // 本流程每镜都是首尾帧，不支持的模型不报价（提交时闸门 2 还会再查一次）
+  if (price.firstLastFrame !== true) throw new Error(`模型 ${price.id} 不支持首尾帧，不能用于本流程`);
+  const maxSeconds = price.maxSeconds;
+  if (typeof maxSeconds !== "number" || !Number.isInteger(maxSeconds) || maxSeconds < 4) {
+    throw new Error(`价格表里模型 ${price.id} 的单镜上限 maxSeconds 不合法：${JSON.stringify(maxSeconds)}`);
+  }
   if (shots.length === 0) throw new Error("没有指定镜头");
   const seen = new Set<string>();
   for (const s of shots) {
@@ -166,6 +173,7 @@ export function buildQuote(film: string, shots: string[], model?: Model): Quote 
     } catch {
       throw new Error(`${shot} 的秒数不合法：${JSON.stringify(seconds)}`);
     }
+    if (billable > maxSeconds) throw new Error(`${shot} 计费 ${billable} 秒，超过 ${price.id} 单镜上限 ${maxSeconds} 秒，请拆镜头`);
     return { shot, seconds, billable, reviewHash: passedReviewHash(dir, shot) };
   });
   const rawTotal = lines.reduce((a, l) => a + l.billable, 0) * price.cnyPerSecond720p;

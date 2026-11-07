@@ -1,4 +1,4 @@
 { "default": "mini",
   "models": {
-    "mini": { "id": "seedance-2.0-mini", "cnyPerSecond720p": 0.15, "firstLastFrame": true },
-    "2.5":  { "id": "seedance-2.5",      "cnyPerSecond720p": 0.55, "firstLastFrame": false } } }
+    "mini": { "id": "seedance-2.0-mini", "cnyPerSecond720p": 0.15, "firstLastFrame": true,  "maxSeconds": 15 },
+    "2.5":  { "id": "seedance-2.5",      "cnyPerSecond720p": 0.55, "firstLastFrame": false, "maxSeconds": 30 } } }

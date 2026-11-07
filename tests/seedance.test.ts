@@ -140,8 +140,13 @@ test("闸门 1：报价不存在 / 报价超预算", async () => {
 });
 
 test("闸门 2：模型不支持首尾帧（seedance-2.5）", async () => {
-  await withFilm({}, async () => {
-    const id = await quoteAndApprove("S01,S02", "2.5");
+  await withFilm({}, async (c) => {
+    // quote.ts 已经不给 2.5 报价；这里手改一份报价和批准，确认闸门 2 自己也拦得住
+    const id = await quoteAndApprove("S01,S02");
+    const qp = join(c.dir, "quotes", `${id}.json`);
+    const ap = join(c.dir, "approvals", `${id}.json`);
+    writeFileSync(qp, JSON.stringify({ ...JSON.parse(readFileSync(qp, "utf8")), model: "2.5", modelId: "seedance-2.5", totalCNY: 5.5 }));
+    writeFileSync(ap, JSON.stringify({ ...JSON.parse(readFileSync(ap, "utf8")), totalCNY: 5.5 }));
     assert.deepEqual(checkGates(FILM, id), ["模型 seedance-2.5 不支持首尾帧"]);
   });
 });

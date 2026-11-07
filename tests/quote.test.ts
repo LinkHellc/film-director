@@ -84,9 +84,6 @@ test("两镜各 4.4 秒：mini 合计 1.5，2.5 合计 5.5；reviewHash 是最�
     assert.equal(q.overBudget, false);
     assert.deepEqual(q.shots.map((s) => [s.shot, s.seconds, s.billable]), [["S01", 4.4, 5], ["S02", 4.4, 5]]);
     assert.equal(q.shots[0].reviewHash, sha256File(latest));
-    const q25 = buildQuote(FILM, ["S01", "S02"], "2.5");
-    assert.equal(q25.modelId, "seedance-2.5");
-    assert.equal(q25.totalCNY, 5.5);
   });
 });
 
@@ -128,13 +125,13 @@ test("连续两次报价得到 Q1、Q2，打印报价句子", async () => {
       out.at(-1),
       "报价 Q1：2 镜 10 秒 mini 约 ¥1.5（估算，以账单为准）；已花 ¥1.0，预算余 ¥99.0",
     );
-    assert.equal(await main([FILM, "--shots", "S01", "--model", "2.5"]), 0);
-    assert.match(out.at(-1)!, /^报价 Q2：1 镜 5 秒 2\.5 约 ¥2\.8/);
+    assert.equal(await main([FILM, "--shots", "S01"]), 0);
+    assert.match(out.at(-1)!, /^报价 Q2：1 镜 5 秒 mini 约 ¥0\.8/);
     assert.deepEqual(readdirSync(join(dir, "quotes")).sort(), ["Q1.json", "Q2.json"]);
     const q2 = JSON.parse(readFileSync(join(dir, "quotes", "Q2.json"), "utf8"));
     assert.equal(q2.id, "Q2");
     assert.equal(q2.film, FILM);
-    assert.equal(q2.model, "2.5");
+    assert.equal(q2.model, "mini");
   });
 });
 
@@ -206,5 +203,26 @@ test("预算比较用未四舍五入的已花：已花 6.04 + 报价 1.5 > 预�
     assert.equal(q.overBudget, true);
     assert.equal(await main([FILM, "--shots", "S01,S02"]), 2);
     assert.match(out.at(-1)!, /^超预算/);
+  });
+});
+
+test("不支持首尾帧的模型（2.5）不报价：退出 2，不写报价", async () => {
+  await withFilm({ budget: 100, shots: { S01: 4.4 } }, async (dir, out) => {
+    review(dir, "S01", 1, "pass");
+    assert.throws(() => buildQuote(FILM, ["S01"], "2.5"), /^Error: 模型 seedance-2\.5 不支持首尾帧，不能用于本流程$/);
+    assert.equal(await main([FILM, "--shots", "S01", "--model", "2.5"]), 2);
+    assert.equal(out.at(-1), "模型 seedance-2.5 不支持首尾帧，不能用于本流程");
+    assert.deepEqual(readdirSync(join(dir, "quotes")), []);
+  });
+});
+
+test("计费秒数超过模型单镜上限（mini 15 秒）：退出 2，不写报价；正好 15 秒可以", async () => {
+  await withFilm({ budget: 100, shots: { S01: 14.6, S02: 14.4 } }, async (dir, out) => {
+    review(dir, "S01", 1, "pass");
+    review(dir, "S02", 1, "pass");
+    assert.equal(await main([FILM, "--shots", "S02,S01"]), 2);
+    assert.equal(out.at(-1), "S01 计费 16 秒，超过 seedance-2.0-mini 单镜上限 15 秒，请拆镜头");
+    assert.deepEqual(readdirSync(join(dir, "quotes")), []);
+    assert.equal(buildQuote(FILM, ["S02"]).shots[0].billable, 15);
   });
 });

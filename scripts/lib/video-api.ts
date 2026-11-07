@@ -25,7 +25,8 @@
  *     last_frame，每张图仍填写完整 data URL"；url 必须是完整 data URL（不是裸 base64、外部网址或本地路径）。
  *     单图 input_reference 默认按"参考图"处理，不是首帧——所以不用 input_reference。
  *   - 时长 seconds（整数秒）：seedance-2.0-mini 4–15 秒，seedance-2.5 4–30 秒 [C][D][E][G]；不传按最短。
- *     → billableSeconds 下限由 2 改为 4（scripts/quote.ts）。上限未在本地检查：超了网关 400、不建任务不扣费 [E][G]。
+ *     → billableSeconds 下限由 2 改为 4（scripts/quote.ts）。上限写在 config/pricing.json 的 maxSeconds（mini 15、2.5 30），
+ *       quote.ts 报价时检查（超了网关也会 400、不建任务不扣费 [E][G]）。
  *   - 分辨率 resolution "720p"；比例 aspect_ratio ∈ 16:9 9:16 1:1 4:3 3:4 21:9 [C]。
  *   - 返回 {"id":"task_xxx","status":"queued",...}，id 是公开任务 ID [E][F]。
  *   - 规格不符 → 400，不建任务、不扣费 [E][G]。每次 POST 都是新任务、单独计费；幂等键不会合并；
