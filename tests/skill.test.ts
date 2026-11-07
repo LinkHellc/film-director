@@ -202,6 +202,16 @@ test('C1: the Skill dispatches reviews to film-reviewer, never "Explore"', () =>
   assert.ok(read(join(SKILL, "SKILL.md")).includes('subagent_type: "film-reviewer"'), "SKILL.md 要用 film-reviewer 派审核");
 });
 
+test("I3: G4 docs say a bare option number is not approval; the person types 批准 Q<n>", () => {
+  const g4 = gateSection("G4")!;
+  const skill = read(join(SKILL, "SKILL.md"));
+  for (const [name, text] of [["gates.md G4", g4], ["SKILL.md", skill]] as const) {
+    assert.ok(text.includes("只回一个数字不算批准"), `${name} 要写明只回一个数字不算批准`);
+    assert.ok(text.includes("原样打出 `批准 Q<n>`"), `${name} 要写明请本人原样打出 批准 Q<n>`);
+  }
+  for (const bad of ["拒绝批准 Q3", "批准 Q3？", "3"]) assert.ok(!saidApproves(bad, "Q3"), bad);
+});
+
 test(".gitattributes normalizes text to LF (cmd/ps1 CRLF) and gates.md is LF", () => {
   const ga = read(join(REPO, ".gitattributes"));
   for (const line of ["* text=auto eol=lf", "*.cmd text eol=crlf", "*.ps1 text eol=crlf"]) {
