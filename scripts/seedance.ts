@@ -9,11 +9,13 @@ import { readApproval } from "./approve.ts";
 import {
   apiKey,
   ArrearsError,
+  baseUrl,
   createTask,
   downloadVideo,
   GatewayError,
   getTask,
   MissingKeyError,
+  normBase,
   scrub,
   type TaskStatus,
 } from "./lib/video-api.ts";
@@ -289,12 +291,14 @@ async function submit(args: string[]): Promise<number> {
     const price = readPricing().models[q.model];
     const aspect = readState(film).settings.aspect;
     const spendPath = join(dir, "spend.jsonl");
+    // 记下提交时的网关地址：之后查询、下载只去同一个网关（换了地址就跳过，不把任务号和 Key 发给别的网关）
+    const gateway = baseUrl();
     let n = 0;
     let total = 0;
     for (const line of q.shots) {
       const shot = line.shot;
       const cny = line.billable * price.cnyPerSecond720p;
-      const base = { quote: quoteId, shot, model: price.id, billable: line.billable, cny };
+      const base = { quote: quoteId, shot, model: price.id, billable: line.billable, cny, baseUrl: gateway };
 
       // 1) 建任务：这里的失败都还没花钱，或者花没花不确定
       let task: string;
@@ -412,15 +416,26 @@ function doneTasks(dir: string): Set<string> {
   return done;
 }
 
-/** spend.jsonl 里有任务编号、还没下载或失败结束的任务（按提交顺序，去重）。 */
-function pendingTasks(dir: string): Pending[] {
+/**
+ * spend.jsonl 里有任务编号、还没下载或失败结束的任务（按提交顺序，去重）。
+ * 提交时的网关地址（行里的 baseUrl，旧行没有按默认地址）和现在的 SEEDANCE_BASE_URL 不同的跳过并说明；
+ * warned 用来让同一个任务在一次 wait 里只说一次。
+ */
+function pendingTasks(dir: string, warned: Set<string> = new Set()): Pending[] {
   const done = doneTasks(dir);
+  const current = baseUrl();
   const out: Pending[] = [];
   const seen = new Set<string>();
   for (const r of readSpendRows(dir)) {
     if (typeof r.task !== "string" || !r.task || typeof r.shot !== "string") continue;
     if (done.has(r.task) || seen.has(r.task)) continue;
     seen.add(r.task);
+    const at = normBase(r.baseUrl);
+    if (at !== current) {
+      if (!warned.has(r.task)) console.error(`${r.shot} 的任务是在 ${at} 提交的，当前网关地址不同，跳过`);
+      warned.add(r.task);
+      continue;
+    }
     out.push({ shot: r.shot, task: r.task });
   }
   return out;
@@ -430,23 +445,19 @@ function pendingTasks(dir: string): Pending[] {
 const MAX_QUERY_ERRORS = 5;
 
 /**
- * 查一遍所有待查任务。查询返回 404/410（网关上没有这个任务）直接算失败；
- * 传入 errCounts（wait 用）时，同一任务连续出错 MAX_QUERY_ERRORS 次也算失败；其他出错为 unknown（没结束）。
+ * 查一遍所有待查任务。任何查询出错（含 404/410、回复里没有可识别的状态）都是 unknown（没结束），
+ * 单次 poll / fetch 永远不因为出错就判失败——任务可能已经付了钱，一次查不到不代表没有。
+ * 只有传入 errCounts（wait 用）时，同一任务在这次 wait 里连续出错 MAX_QUERY_ERRORS 次才算失败。
  */
-async function pollOnce(dir: string, errCounts?: Map<string, number>): Promise<PollResult[]> {
+async function pollOnce(dir: string, errCounts?: Map<string, number>, warned?: Set<string>): Promise<PollResult[]> {
   const out: PollResult[] = [];
-  for (const p of pendingTasks(dir)) {
+  for (const p of pendingTasks(dir, warned)) {
     try {
       out.push({ ...p, ...(await getTask(p.task)) });
       errCounts?.delete(p.task);
     } catch (err) {
       if (err instanceof MissingKeyError) throw err;
       const msg = scrub((err as Error).message);
-      const status = err instanceof GatewayError ? err.status : null;
-      if (status === 404 || status === 410) {
-        out.push({ ...p, status: "failed", error: `网关上找不到这个任务（${msg}）` });
-        continue;
-      }
       const n = (errCounts?.get(p.task) ?? 0) + 1;
       errCounts?.set(p.task, n);
       if (errCounts && n >= MAX_QUERY_ERRORS) {
@@ -562,8 +573,9 @@ async function wait(args: string[]): Promise<number> {
   const dir = filmDir(film);
   const deadline = Date.now() + timeout * 1000;
   const errCounts = new Map<string, number>();
+  const warned = new Set<string>();
   for (;;) {
-    const results = await pollOnce(dir, errCounts);
+    const results = await pollOnce(dir, errCounts, warned);
     // 全部结束：下载并记录，退出 0（个别镜头生成失败也是 0，原因已打印并写进 fetched.jsonl）
     if (!unfinished(results)) return fetchAll(film, results);
     const left = deadline - Date.now();

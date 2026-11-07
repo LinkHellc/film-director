@@ -27,7 +27,7 @@ export interface Pricing {
   models: Record<Model, { id: string; cnyPerSecond720p: number; firstLastFrame?: boolean; maxSeconds?: number }>;
 }
 
-/** spend.jsonl 的一行。submit 写 {at,quote,shot,task,model,billable,cny}；结果不明时 task 为 null 且 uncertain 为 true。 */
+/** spend.jsonl 的一行。submit 写 {at,quote,shot,task,model,billable,cny,baseUrl}；结果不明时 task 为 null 且 uncertain 为 true。 */
 export interface SpendRow {
   at?: string;
   quote?: string;
@@ -37,6 +37,8 @@ export interface SpendRow {
   billable?: number;
   cny: number;
   uncertain?: boolean;
+  /** 提交时的网关地址（旧行没有，按默认地址算）。 */
+  baseUrl?: string;
 }
 
 const USAGE = "用法：quote.ts <片名> --shots S01,S02 [--model mini|2.5]";

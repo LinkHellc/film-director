@@ -89,7 +89,7 @@ export interface CreateRequest {
 
 export type TaskStatus = "queued" | "running" | "succeeded" | "failed";
 
-const DEFAULT_BASE = "https://newapi.dragon3api.com";
+export const DEFAULT_BASE = "https://newapi.dragon3api.com";
 const ASPECTS = ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"];
 const MIME: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp" };
 const CREATE_TIMEOUT_MS = 180_000;
@@ -97,7 +97,12 @@ const QUERY_TIMEOUT_MS = 30_000;
 const DOWNLOAD_TIMEOUT_MS = 600_000;
 
 export function baseUrl(): string {
-  return (process.env.SEEDANCE_BASE_URL || DEFAULT_BASE).replace(/\/+$/, "");
+  return normBase(process.env.SEEDANCE_BASE_URL);
+}
+
+/** 网关地址去掉末尾的 /；空值按默认地址（旧的 spend 行没有 baseUrl 字段）。 */
+export function normBase(url: string | null | undefined): string {
+  return (typeof url === "string" && url.trim() ? url.trim() : DEFAULT_BASE).replace(/\/+$/, "");
 }
 
 /** 读 Key；没设抛 MissingKeyError。Key 只放进请求头，不进任何输出。 */
@@ -208,7 +213,48 @@ export async function createTask(req: CreateRequest): Promise<{ id: string }> {
   throw new GatewayError(describe(res.status, text), res.status, res.status >= 500);
 }
 
-/** 查任务。网关状态 queued / in_progress / completed / failed 映射为 queued / running / succeeded / failed；不认识的当 running。 */
+/**
+ * 网关查询状态 → 本地状态（键一律小写）。来源 new-api 源码（2026-11-08 读 main 分支）：
+ *   - relay/relay_task.go videoFetchByIDRespBodyBuilder：GET /v1/videos/{id} 走各 adaptor 的 ConvertToOpenAIVideo，
+ *     顶层 {id, status: queued|in_progress|completed|failed, error:{message}}（与 [F] 一致）；
+ *     其他查询路径返回通用 TaskDto：{code:"success", data:{task_id, status, fail_reason, result_url, ...}}，
+ *     data.status 是 model/task.go 的 NOT_START / SUBMITTED / QUEUED / IN_PROGRESS / FAILURE / SUCCESS / UNKNOWN；
+ *     Gemini/Vertex 实时查询的简化格式是 {code, data:{task_id, status: queued|processing|succeeded|failed, url, error}}。
+ *   - 任务不存在：HTTP 400，code "task_not_exist"（不是 404）；查库出错 500。
+ * 所以状态可能在顶层 status，也可能在 data.status；有的上游用 task_status，一并兼容。
+ * UNKNOWN、空值和不认识的状态都不算"还在跑"，按查询出错处理（见 getTask）。
+ */
+const STATUS_MAP: Record<string, TaskStatus> = {
+  queued: "queued",
+  submitted: "queued",
+  not_start: "queued",
+  pending: "queued",
+  in_progress: "running",
+  running: "running",
+  processing: "running",
+  generating: "running",
+  completed: "succeeded",
+  succeeded: "succeeded",
+  success: "succeeded",
+  failed: "failed",
+  failure: "failed",
+  cancelled: "failed",
+  canceled: "failed",
+  expired: "failed",
+};
+
+/** 依次看 status、task_status、data.status、data.task_status，取第一个非空字符串。 */
+function rawStatus(j: any): string {
+  for (const v of [j?.status, j?.task_status, j?.data?.status, j?.data?.task_status]) {
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  return "";
+}
+
+/**
+ * 查任务。状态见 STATUS_MAP（顶层或 data 里都认）。HTTP 出错、回复不是 JSON、没有可识别的状态都抛 GatewayError
+ * （由调用方按"查询出错"计数，不当作还在跑，也不因为一次出错就判失败）。
+ */
 export async function getTask(id: string): Promise<{ status: TaskStatus; videoUrl?: string; error?: string }> {
   let res: Response;
   try {
@@ -224,29 +270,18 @@ export async function getTask(id: string): Promise<{ status: TaskStatus; videoUr
   } catch {
     throw new GatewayError("查询回复不是 JSON", res.status, false);
   }
-  const raw = String(j?.status ?? "").toLowerCase();
-  const map: Record<string, TaskStatus> = {
-    queued: "queued",
-    submitted: "queued",
-    not_start: "queued",
-    in_progress: "running",
-    running: "running",
-    processing: "running",
-    completed: "succeeded",
-    succeeded: "succeeded",
-    success: "succeeded",
-    failed: "failed",
-    failure: "failed",
-    cancelled: "failed",
-    expired: "failed",
-  };
-  const status = map[raw] ?? "running";
+  const raw = rawStatus(j);
+  const status = Object.hasOwn(STATUS_MAP, raw.toLowerCase()) ? STATUS_MAP[raw.toLowerCase()] : undefined;
+  if (!status) {
+    throw new GatewayError(scrub(`查询回复里没有可识别的状态（status：${JSON.stringify(firstChars(raw, 40))}）`), res.status, false);
+  }
+  const d = j?.data && typeof j.data === "object" ? j.data : {};
   const out: { status: TaskStatus; videoUrl?: string; error?: string } = { status };
-  const url = j?.video_url ?? j?.url ?? j?.metadata?.url ?? j?.content?.video_url;
+  const url = j?.video_url ?? j?.url ?? j?.metadata?.url ?? j?.content?.video_url ?? d.result_url ?? d.url;
   if (typeof url === "string" && /^https?:\/\//.test(url)) out.videoUrl = url;
   if (status === "failed") {
-    const e = j?.error;
-    const msg = typeof e === "string" ? e : e?.message ?? j?.fail_reason ?? raw;
+    const e = j?.error ?? d.error;
+    const msg = (typeof e === "string" ? e : e?.message) || j?.fail_reason || d.fail_reason || raw;
     out.error = scrub(firstChars(String(msg || "失败"), 300));
   }
   return out;

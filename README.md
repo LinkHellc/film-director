@@ -59,7 +59,7 @@ winget install Gyan.FFmpeg
 | 环境变量 | 必须 | 说明 |
 |---|---|---|
 | `SEEDANCE_API_KEY` | 是 | 网关的 Key。只设在你的用户环境变量里，**不要写进任何文件，也不要发到对话里** |
-| `SEEDANCE_BASE_URL` | 否 | 不设就用 `https://newapi.dragon3api.com`；试跑用假网关时才设成 `http://127.0.0.1:<端口>` |
+| `SEEDANCE_BASE_URL` | 否 | 不设就用 `https://newapi.dragon3api.com`；试跑用假网关时才设成 `http://127.0.0.1:<端口>`。每个任务记下提交时的网关地址，之后查询、下载只去同一个地址；中途改了地址，`poll`/`fetch`/`wait` 会说"当前网关地址不同，跳过"，改回来再等 |
 
 ```powershell
 [Environment]::SetEnvironmentVariable('SEEDANCE_API_KEY', '<你的key>', 'User')

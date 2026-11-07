@@ -30,6 +30,11 @@ export interface VideoServerOptions {
   stuck?: string[];
   /** 任务的最终结果（默认 ok）。 */
   result?: "ok" | "fail";
+  /** 查询回复的写法：openai（默认，顶层 status）；data（new-api 通用 TaskDto：{code,data:{status:"SUCCESS"…}}）；
+   *  empty（status 是空字符串）。 */
+  queryShape?: "openai" | "data" | "empty";
+  /** 网关上已经有的任务（模拟"提交结果不明、其实建成了"的任务）。 */
+  known?: string[];
   /** 下载返回的视频内容。 */
   video?: Uint8Array;
   port?: number;
@@ -75,6 +80,7 @@ export async function startVideoServer(options: VideoServerOptions = {}): Promis
   let createCount = 0;
   let seq = 0;
   const video = options.video ?? new TextEncoder().encode("FAKE-MP4-DATA");
+  for (const id of options.known ?? []) tasks.set(id, { queries: 0 });
 
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     const chunks: Buffer[] = [];
@@ -133,6 +139,11 @@ export async function startVideoServer(options: VideoServerOptions = {}): Promis
       }
       t.queries++;
       const finished = !stuck && t.queries >= (options.succeedAfter ?? 1);
+      if (options.queryShape === "empty") return send(res, 200, { id, object: "video", status: "" });
+      if (options.queryShape === "data") {
+        const st = !finished ? (t.queries === 1 ? "QUEUED" : "IN_PROGRESS") : options.result === "fail" ? "FAILURE" : "SUCCESS";
+        return send(res, 200, { code: "success", message: "", data: { task_id: id, status: st, fail_reason: st === "FAILURE" ? "上游失败" : "", progress: "50%" } });
+      }
       if (!finished) return send(res, 200, { id, object: "video", status: t.queries === 1 ? "queued" : "in_progress", progress: 50 });
       if (options.result === "fail") {
         return send(res, 200, { id, object: "video", status: "failed", progress: 100, error: { message: "内容审核未通过", code: "content_policy" } });

@@ -245,7 +245,8 @@ test("submit：闸门通过后逐镜头建任务、记账、改状态；请求�
     }
     const rows = spendLines(c.dir);
     assert.equal(rows.length, 2);
-    assert.deepEqual(Object.keys(rows[0]).sort(), ["at", "billable", "cny", "model", "quote", "shot", "task"]);
+    assert.deepEqual(Object.keys(rows[0]).sort(), ["at", "baseUrl", "billable", "cny", "model", "quote", "shot", "task"]);
+    assert.equal(rows[0].baseUrl, c.gw.url);
     assert.equal(rows[0].quote, id);
     assert.equal(rows[0].shot, "S01");
     assert.equal(rows[0].task, "task_fake0001");
@@ -325,6 +326,7 @@ test("提交时连接断开（结果不明）：退出 1，按可能已扣费记
     assert.equal(rows.length, 1);
     assert.equal(rows[0].task, null);
     assert.equal(rows[0].uncertain, true);
+    assert.equal(rows[0].baseUrl, c.gw.url);
     assert.ok(Math.abs(rows[0].cny - 0.75) < 1e-9);
     assert.equal(c.gw.creates().length, 1);
     assert.deepEqual(checkGates(FILM, id), [`报价 ${id} 已经提交过`]);
@@ -530,5 +532,108 @@ test("wait 超时时也把已经出好的片段下载下来，再退出 6", asyn
     assert.ok(existsSync(join(c.dir, "shots", "S01", "clip-v1.mp4")));
     assert.equal(readState(FILM).shots.S01.clip, "shots/S01/clip-v1.mp4");
     assert.equal(readState(FILM).shots.S02.status, "generating");
+  });
+});
+
+// ---------- 终审 I1：查询出错不直接判死；嵌套状态；网关地址 ----------
+
+function fetchedLines(dir: string): any[] {
+  if (!existsSync(join(dir, "fetched.jsonl"))) return [];
+  return readFileSync(join(dir, "fetched.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+}
+
+test("I1：单次 fetch / poll 遇到 404 → 不写 fetched.jsonl，镜头仍在生成中", async () => {
+  await withFilm({ shots: ["S01"], gw: { vanish: ["task_fake0001"] } }, async (c) => {
+    const id = await quoteAndApprove("S01");
+    assert.equal(await main(["submit", FILM, "--quote", id]), 0);
+    for (const cmd of ["fetch", "fetch", "poll", "poll", "fetch", "poll"]) await main([cmd, FILM]);
+    assert.deepEqual(fetchedLines(c.dir), []);
+    assert.equal(readState(FILM).shots.S01.status, "generating");
+    c.out.length = 0;
+    assert.equal(await main(["poll", FILM]), 10);
+    assert.match(c.out.join("\n"), /S01 task_fake0001：查询失败：.*404/);
+  });
+});
+
+test("I1：wait 里同一任务连续 404 达到上限（5 次）才判失败", async () => {
+  await withFilm({ shots: ["S01"], gw: { vanish: ["task_fake0001"] } }, async (c) => {
+    const id = await quoteAndApprove("S01");
+    assert.equal(await main(["submit", FILM, "--quote", id]), 0);
+    assert.equal(await main(["wait", FILM, "--interval", "0", "--timeout", "30"]), 0);
+    const q = c.gw.requests.filter((r) => r.method === "GET" && r.path === "/v1/videos/task_fake0001");
+    assert.equal(q.length, 5);
+    const rows = fetchedLines(c.dir);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].status, "failed");
+    assert.match(rows[0].error, /连续 5 次查询出错.*404/);
+  });
+});
+
+test("I1：new-api 通用格式 {code,data:{status:\"SUCCESS\"}} 能解析，wait 下载到片子", async () => {
+  await withFilm({ shots: ["S01"], gw: { queryShape: "data", succeedAfter: 2 } }, async (c) => {
+    const id = await quoteAndApprove("S01");
+    assert.equal(await main(["submit", FILM, "--quote", id]), 0);
+    c.out.length = 0;
+    assert.equal(await main(["poll", FILM, "--json"]), 10);
+    assert.equal(JSON.parse(c.out.at(-1)!)[0].status, "queued");
+    assert.equal(await main(["wait", FILM, "--interval", "0", "--timeout", "30"]), 0);
+    assert.ok(existsSync(join(c.dir, "shots", "S01", "clip-v1.mp4")));
+  });
+  await withFilm({ shots: ["S01"], gw: { queryShape: "data", result: "fail" } }, async (c) => {
+    const id = await quoteAndApprove("S01");
+    assert.equal(await main(["submit", FILM, "--quote", id]), 0);
+    c.out.length = 0;
+    assert.equal(await main(["fetch", FILM]), 0);
+    assert.ok(c.out.includes("S01 生成失败：上游失败"), c.out.join("\n"));
+  });
+});
+
+test("I1：status 为空算查询出错，不当作生成中；单次 poll 不写记录，wait 连续 5 次才判失败", async () => {
+  await withFilm({ shots: ["S01"], gw: { queryShape: "empty" } }, async (c) => {
+    const id = await quoteAndApprove("S01");
+    assert.equal(await main(["submit", FILM, "--quote", id]), 0);
+    c.out.length = 0;
+    assert.equal(await main(["poll", FILM, "--json"]), 10);
+    const r = JSON.parse(c.out.at(-1)!)[0];
+    assert.equal(r.status, "unknown");
+    assert.match(r.error, /没有可识别的状态/);
+    assert.deepEqual(fetchedLines(c.dir), []);
+    assert.equal(await main(["wait", FILM, "--interval", "0", "--timeout", "30"]), 0);
+    const rows = fetchedLines(c.dir);
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].status, "failed");
+    assert.match(rows[0].error, /连续 5 次查询出错/);
+  });
+});
+
+test("I1：当前网关地址和提交时不同 → poll/fetch/wait 跳过这一行、不查询、不写 fetched.jsonl", async () => {
+  await withFilm({ shots: ["S01"] }, async (c) => {
+    const id = await quoteAndApprove("S01");
+    assert.equal(await main(["submit", FILM, "--quote", id]), 0);
+    const submitted = c.gw.url;
+    process.env.SEEDANCE_BASE_URL = submitted.replace("127.0.0.1", "localhost");
+    const before = c.gw.requests.length;
+    for (const argv of [["poll", FILM], ["fetch", FILM], ["wait", FILM, "--interval", "0", "--timeout", "5"]]) {
+      c.out.length = 0;
+      assert.equal(await main(argv), 0, argv.join(" "));
+      assert.ok(c.out.includes(`S01 的任务是在 ${submitted} 提交的，当前网关地址不同，跳过`), c.out.join("\n"));
+    }
+    assert.equal(c.gw.requests.length, before);
+    assert.deepEqual(fetchedLines(c.dir), []);
+    // 地址改回来（末尾多一个 / 也算同一个）就能接着下载
+    process.env.SEEDANCE_BASE_URL = submitted + "/";
+    assert.equal(await main(["wait", FILM, "--interval", "0", "--timeout", "30"]), 0);
+    assert.ok(existsSync(join(c.dir, "shots", "S01", "clip-v1.mp4")));
+  });
+});
+
+test("I1：旧的 spend 行没有 baseUrl 时按默认地址算；当前地址不是默认地址就跳过", async () => {
+  await withFilm({ shots: ["S01"] }, async (c) => {
+    writeFileSync(join(c.dir, "spend.jsonl"), JSON.stringify({ quote: "Q1", shot: "S01", task: "task_old", cny: 0.75 }) + "\n");
+    c.out.length = 0;
+    assert.equal(await main(["fetch", FILM]), 0);
+    assert.ok(c.out.includes("S01 的任务是在 https://newapi.dragon3api.com 提交的，当前网关地址不同，跳过"), c.out.join("\n"));
+    assert.equal(c.gw.requests.length, 0);
+    assert.deepEqual(fetchedLines(c.dir), []);
   });
 });
