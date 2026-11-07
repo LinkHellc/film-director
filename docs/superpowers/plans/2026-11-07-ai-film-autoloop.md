@@ -8,19 +8,19 @@
 
 **Tech Stack:** Node 24（直接跑 `.ts`，内置 `node:test`，零 npm 依赖），Python 3.14 + Pillow（项目 `.venv`），ffmpeg，agent-autoloop，Claude Code 2.1.x，Codex CLI 0.77，火山方舟 Seedance API。
 
-**Spec:** `docs/superpowers/specs/2026-11-07-ai-film-autoloop-design.md`
+**Spec:** `docs/superpowers/specs/2026-11-07-ai-film-autoloop-design.md`（以"修订 R1"一节为准）
 
 ## Global Constraints
 
 - 所有产物只新建、不覆盖、不删除；同名产物用 `-v<n>` 递增。唯一例外是 `state.json`（状态文件，原地更新）和追加写的 `spend.jsonl`、`requirements.md`。
-- 默认模型 `doubao-seedance-2-0-mini-260615`（720p 约 ¥0.5/秒）；可选 `doubao-seedance-2-5-260628`（720p 约 ¥1.5/秒）。单价只放在 `config/pricing.json`。
+- 默认模型 `seedance-2.0-mini`（网关价 720p ¥0.15/秒）；可选 `seedance-2.5`（¥0.55/秒，首尾帧支持核实前不可用）。单价只放在 `config/pricing.json`。（R1）
 - 计费秒数：片中时长向上取整；若 `取整值 − 片中时长 < 0.5` 再加 1 秒。
-- 视频接口：`POST https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks`；Key 只从环境变量 `ARK_API_KEY` 读，永不打印、不进日志。基址可用 `ARK_BASE_URL` 覆盖（测试用）。
+- 视频接口：第三方 new-api 网关 `POST {SEEDANCE_BASE_URL}/v1/videos`，`SEEDANCE_BASE_URL` 默认 `https://newapi.dragon3api.com`；Key 只从环境变量 `SEEDANCE_API_KEY` 读，永不打印、不进日志、不写文件。（R1）
 - Codex 调用：`codex exec --skip-git-repo-check -s read-only -i <参考图> - < <提示词>`，提示词开头固定为 `Use your image generation tool to create exactly ONE image. Do not run shell commands.`
-- 审核进程：`claude -p --tools "Read,Glob,Grep" --no-session-persistence --output-format json`，不接旧会话。
-- 外部命令都可用环境变量覆盖成 JSON 数组（测试用假程序）：`FILM_CLAUDE_CMD`、`FILM_CODEX_CMD`；Codex 出图目录用 `FILM_CODEX_IMAGES` 覆盖（默认 `~/.codex/generated_images`）。
+- 审核：导演会话开的只读子 agent；`review.ts` 只做 prepare/record，不启动模型。（R1）
+- 外部命令可用环境变量覆盖成 JSON 数组（测试用假程序）：`FILM_CODEX_CMD`；Codex 出图目录用 `FILM_CODEX_IMAGES` 覆盖（默认 `~/.codex/generated_images`）。
 - 项目根用 `FILM_ROOT` 覆盖（默认仓库根），测试一律在临时目录里跑。
-- 中台地址 `AGENT_AUTOLOOP_URL`（默认 `http://127.0.0.1:3350`）；本人密钥从 `~/.agent-autoloop/config.json` 的 `owner` 读，来源密钥用 `AGENT_AUTOLOOP_FILM_KEY`。
+- 导演是本人在 Claude 桌面端开的 Code 会话（工作目录 = 本项目），Skill 在 `.claude/skills/film-director/`；agent-autoloop 不参与制作流程。（R1）
 - 事项编号固定为 `film:<片名>`；片名只允许 `[A-Za-z0-9_\-\u4e00-\u9fa5]{1,40}`。
 - 不充值、不买额度；Seedance 返回欠费即停。
 - 测试命令：`node --test tests/`（Node），`.venv/Scripts/python -m unittest discover -s tests/py`（Python）。
@@ -158,99 +158,161 @@
 - [ ] **Step 4:** 预期 PASS。
 - [ ] **Step 5:** 提交 `feat: 报价`。
 
-### Task 3: 隔离审核与审核清单
+### Task 3: 审核的准备与记录（R1）
 
 **Files:**
-- Create: `scripts/lib/proc.ts`、`scripts/review.ts`、`config/reviews.json`、`skills/film-director/references/reviews/story.md`、`keyframe-plan.md`、`keyframes.md`、`pre-submit.md`、`final.md`、`tests/fakes/claude.ts`
+- Create: `scripts/review.ts`、`config/reviews.json`、`.claude/skills/film-director/references/reviews/story.md`、`keyframe-plan.md`、`keyframes.md`、`pre-submit.md`、`final.md`
 - Test: `tests/review.test.ts`
 
 **Interfaces:**
-- Consumes: Task 0、`readState`
+- Consumes: Task 0（`filmDir`、`nextVersionPath`、`writeNew`、`sha256File`）、Task 2 读审核记录的约定
 - Produces:
   ```ts
-  resolveCommand(envName: string, fallback: string[]): string[]
-  run(cmd: string[], opts: { cwd?: string; stdin?: string; timeoutMs?: number }): Promise<{ code: number; stdout: string; stderr: string }>
   type ReviewKind = "story"|"keyframe-plan"|"keyframes"|"pre-submit"|"final";
   parseVerdict(text: string): "pass"|"fail"
   materialsFor(kind: ReviewKind, film: string, shot?: string): string[]   // 绝对路径，按 config/reviews.json 取每类模式下最新版本
-  interface ReviewRecord { kind: ReviewKind; film: string; shot: string|null; verdict: "pass"|"fail"; at: string; files: Record<string, string> } // 路径 → sha256
+  interface ReviewRecord { kind: ReviewKind; film: string; shot: string|null; verdict: "pass"|"fail"; at: string; files: Record<string, string> } // 绝对路径 → sha256
   ```
-  `review.ts <类型> <片名> [--shot S03]`：提示词 = 清单全文 + `\n\n资料（只读这些文件）：\n` + 每行一个绝对路径 + `\n对照本人要求：` + `requirements.md` 路径。以 `resolveCommand("FILM_CLAUDE_CMD", ["claude"])` 加参数 `-p --tools Read,Glob,Grep --no-session-persistence --output-format json` 运行，提示词走 stdin，`cwd` 为片子目录，超时 15 分钟。从 JSON 的 `result` 字段取回复，写 `reviews/<类型>[-<镜头>]-v<n>.md` 和同名 `.json`（`ReviewRecord`）。打印 `审核 <类型>：通过|不通过（reviews/...md）`；通过退出 0，不通过退出 1，进程出错退出 3。
-  `config/reviews.json` 模式（相对片子目录，`*` 取最新版本）：story → `story/shots-v*.md`；keyframe-plan → `shots/<镜头>/plan-v*.md`、`board/storyboard-v*.md`；keyframes → `shots/<镜头>/first-v*.png`、`last-v*.png`、`style/sheet-*-v*.png`（全部角色）、`shots/<镜头>/plan-v*.md`；pre-submit → `shots/<镜头>/prompt-v*.txt`、`first-v*.png`、`last-v*.png`、`style/sheet-*-v*.png`、`board/storyboard-v*.md`、`board/palette-v*.md`；final → `out/final-v*.mp4` 与 `out/final-v*-frames/`（抽好的帧目录）。
+  - `review.ts prepare <类型> <片名> [--shot S03]`：
+    - 取下一个编号 n，写 `reviews/<类型>[-<镜头>]-v<n>.prompt.md`；
+    - 内容 = 清单全文 + `\n\n资料（只读这些文件，不要读别的）：\n` + 每行一个绝对路径 + `\n本人要求：` + `requirements.md` 绝对路径 + `\n\n最后一行只写"通过"或"不通过"。`；
+    - 同时写同名 `.prompt.json` = `{ kind, film, shot, n, files: {路径: sha256} }`；
+    - 打印提示词文件路径（`/` 分隔），退出 0；
+    - 资料缺失时退出 3，输出以 `缺少资料：` 开头，不写任何文件；
+    - 提示词里不能出现 `state.json` 或 `reviews/` 下的任何路径。
+  - `review.ts record <片名> --prompt <prompt.md 路径> --reply <回复文件>`：
+    - 读同名 `.prompt.json`，逐个重算哈希，有变化就退出 3，输出 `审核期间文件变了：<相对路径>`；
+    - 否则写 `reviews/<类型>[-<镜头>]-v<n>.md`（回复原文）和 `.json`（`ReviewRecord`，`files` 取自 `.prompt.json`）；
+    - 打印 `审核 <类型>：通过|不通过（reviews/...md）`；通过退出 0，不通过退出 1。
+  - `config/reviews.json` 的模式（相对片子目录，`*` 取最新版本），同原 Task 3：
+    - story → `story/shots-v*.md`
+    - keyframe-plan → `shots/<镜头>/plan-v*.md`、`board/storyboard-v*.md`
+    - keyframes → `shots/<镜头>/first-v*.png`、`last-v*.png`、`style/sheet-*-v*.png`（每个角色取最新）、`shots/<镜头>/plan-v*.md`
+    - pre-submit → `shots/<镜头>/prompt-v*.txt`、`first-v*.png`、`last-v*.png`、`style/sheet-*-v*.png`、`board/storyboard-v*.md`、`board/palette-v*.md`
+    - final → `out/final-v*.mp4` 和 `out/final-v*-frames/` 下的全部图片
 
-- [ ] **Step 1:** 写 5 份清单，内容取方法论原文：story = PDF 第 6 页"这是一支短片的逐镜头故事…"清单；keyframe-plan = 第 10 页"先写首帧画什么、尾帧画什么、中间发生什么"的审核要求，套用 keyframes 的 8 项；keyframes = 第 10–11 页 8 项检查；pre-submit = 第 12–13 页"你是审核，只读不改…"清单；final = 第 14 页全片复核清单。每份末尾加两行：`最后一项：对照本人要求文件，列出被忘掉的要求。` 和 `最后一行只写"通过"或"不通过"，不要写别的字。`
+- [ ] **Step 1:** 写 5 份清单，内容取方法论原文（`.superpowers/sdd/2026-11-07-ai-film-autoloop/methodology.txt`）：
+  - story = PDF 第 6 页"这是一支短片的逐镜头故事…"清单；
+  - keyframe-plan = 第 10 页"先写首帧画什么、尾帧画什么、中间发生什么"，套用 keyframes 的 8 项；
+  - keyframes = 第 10–11 页 8 项检查；
+  - pre-submit = 第 12–13 页"你是审核，只读不改…"清单；
+  - final = 第 14 页全片复核清单。
+  - 每份开头写：`你是第一次看这些材料的审核，只读不改，不要写或改任何文件。图片要用 Read 打开放大看。`
+  - 每份结尾加一项：`对照本人要求文件，列出被忘掉的要求。`
 - [ ] **Step 2: 写失败测试**：
-  - `parseVerdict("…\n通过") === "pass"`；`"…\n不通过"`、`"…\n基本通过"`、`"通过\n还有一条建议"`、`""` 都是 `"fail"`（只认去掉空白和 Markdown 加粗后的最后一个非空行恰好等于"通过"）。
-  - 假 claude（`tests/fakes/claude.ts`：读 stdin，把收到的参数和提示词写到 `FAKE_LOG`，输出 `{"result": <FAKE_REPLY>}`）下，`review.ts pre-submit 测试片 --shot S01` 写出 `.md` 和 `.json`，`.json.files` 包含提示词、首帧、尾帧的哈希，退出码 0。
-  - 假程序收到的参数包含 `--tools`、`Read,Glob,Grep`、`--no-session-persistence`，且不包含 `--resume`、`--continue`。
-  - 提示词里不包含 `state.json` 路径，也不包含 `reviews/` 下的任何旧结论路径。
-  - 资料缺失（如没有首帧）时退出码 3，输出 `缺少资料：`。
+  - `parseVerdict`：
+    - `"…\n通过"` → pass；
+    - `"…\n不通过"`、`"…\n基本通过"`、`"通过\n还有一条建议"`、`""` → fail；
+    - 规则：只看去掉空白和 Markdown 加粗后的最后一个非空行，它恰好等于"通过"才算 pass。
+  - `prepare`：写出 `.prompt.md` 和 `.prompt.json`；提示词里列出提示词、首帧、尾帧的绝对路径；不含 `state.json` 或 `reviews/` 路径；缺首帧时退出 3 且不写文件。
+  - `record`：
+    - 回复末行"通过"时退出 0，写出 `.md` 和 `.json`，`.json` 字段与 `ReviewRecord` 一致；
+    - 在 prepare 和 record 之间往提示词文件追加一个字 → 退出 3，输出含 `审核期间文件变了`；
+    - 连续两轮得到 `-v1` 和 `-v2`。
+  - 集成：record 一份 pre-submit 通过之后，Task 2 的 `buildQuote` 能对这个镜头报价，不抛错。
 - [ ] **Step 3:** `node --test tests/review.test.ts`，预期 FAIL。
 - [ ] **Step 4:** 实现。
-- [ ] **Step 5:** 预期 PASS。
-- [ ] **Step 6:** 用真 claude 手动跑一次：在临时片子里放一份 3 镜的假故事，运行 `node scripts/review.ts story <临时片>`，确认能出结论、没有写任何文件到资料目录之外。把输出贴进任务记录。
-- [ ] **Step 7:** 提交 `feat: 隔离审核与审核清单`。
+- [ ] **Step 5:** 预期 PASS，`npm test` 全部通过。
+- [ ] **Step 6:** 提交 `feat: 审核的准备与记录`。
 
-### Task 4: 中台批准核对
+### Task 4: 批准记录（R1，替代原"中台批准核对"）
 
 **Files:**
-- Modify: `scripts/lib/hub.ts`
-- Test: `tests/hub.test.ts`
+- Create: `scripts/approve.ts`
+- Test: `tests/approve.test.ts`
 
 **Interfaces:**
-- Produces:
-  ```ts
-  interface HubCard { id: number; title: string; options: string[]; choice: number|null; answer: string|null; lane?: string; state: string }
-  ownerKey(): string            // 读 ~/.agent-autoloop/config.json 的 owner；可用 AGENT_AUTOLOOP_OWNER_KEY 覆盖（仅测试）
-  getState(): Promise<{ cards: HubCard[]; recentCards: HubCard[] }>
-  findApproval(cards: HubCard[], opts: { cardId: number; film: string; quoteId: string }): { ok: true; card: HubCard } | { ok: false; reason: string }
-  ```
-  `findApproval` 只在以下全部成立时 `ok: true`：存在 `id === cardId` 的卡片；`lane === "film:<片名>"`；`choice` 不为 null；`options[choice]` 以 `批准 <quoteId>` 开头。
+- Consumes: Task 0；Task 2 的 `Quote` 和 `quotes/Q<n>.json`
+- Produces：
+  - `approve.ts <片名> Q3 --said "<本人在对话里的原话>"`：
+    - 用 `writeNew` 写 `approvals/Q3.json` = `{ quote: "Q3", totalCNY, model, shots: [...], said, at }`，已存在就报错；
+    - 下面几种情况都退出 1，且不写文件：
+      - 报价不存在 → `报价 Q3 不存在`；
+      - 报价 `overBudget: true` → `报价 Q3 超预算，不能批准`；
+      - `said` 里不含 `批准 Q3` → `本人原话里没有"批准 Q3"`；
+      - 已经批准过 → `报价 Q3 已经批准过`；
+    - 成功时打印 `已记下批准：Q3 ¥<合计>`。
+  - 导出 `readApproval(film: string, quoteId: string): { quote: string; totalCNY: number; said: string; at: string } | null`，给 Task 5 用。
 
-- [ ] **Step 1: 写失败测试**：选了"批准 Q3（¥5.0）"→ ok；选了"先不拍"→ `reason` 含 `没有批准`；`choice` 为 null、只有自由文字 → 不 ok；`lane` 是 `film:别的片` → `reason` 含 `不是这支片子`；卡片编号不存在 → `reason` 含 `找不到卡片`；批准的是 `Q2` 而核对 `Q3` → 不 ok。`getState` 对假中台发 `Authorization: Bearer <owner>`。
-- [ ] **Step 2:** `node --test tests/hub.test.ts`，预期 FAIL。
-- [ ] **Step 3:** 实现；`getState` 把 `cards` 和 `recentCards` 都返回，`findApproval` 在两者合并后查找。
+- [ ] **Step 1: 写失败测试**：每种拒绝情况各一条，成功一条；`readApproval` 对不存在的报价返回 null。
+- [ ] **Step 2:** `node --test tests/approve.test.ts`，预期 FAIL。
+- [ ] **Step 3:** 实现。
 - [ ] **Step 4:** 预期 PASS。
-- [ ] **Step 5:** 提交 `feat: 中台批准核对`。
+- [ ] **Step 5:** 提交 `feat: 批准记录`。
 
-### Task 5: Seedance 提交、查询、下载
+### Task 5: Seedance（第三方网关）提交、查询、等待、下载（R1）
 
 **Files:**
-- Create: `scripts/lib/ark.ts`、`scripts/seedance.ts`、`tests/fakes/ark-server.ts`
+- Create: `scripts/lib/video-api.ts`、`scripts/seedance.ts`、`tests/fakes/video-server.ts`
+- Modify: `config/pricing.json`、`tests/quote.test.ts`（期望金额随新单价调整）
 - Test: `tests/seedance.test.ts`
 
 **Interfaces:**
-- Consumes: Task 0–4（`readState`、`Quote`、`ReviewRecord`、`findApproval`、`getState`、`sha256File`）
+- Consumes: Task 0–4（`readState`、`writeState`、`Quote`、`ReviewRecord`、`readApproval`、`sha256File`、`nextVersionPath`）
 - Produces:
   ```ts
-  createTask(req: { modelId: string; prompt: string; firstFrame: string; lastFrame: string; seconds: number }): Promise<{ id: string }>
+  createTask(req: { model: string; prompt: string; firstFrame: string; lastFrame: string; seconds: number; resolution: "720p" }): Promise<{ id: string }>
   getTask(id: string): Promise<{ status: "queued"|"running"|"succeeded"|"failed"; videoUrl?: string; error?: string }>
-  class ArrearsError extends Error {}     // 欠费 / 额度不足
-  checkGates(film: string, quoteId: string, cardId: number, cards: HubCard[]): string[]   // 空数组 = 全部通过；否则每项一句中文原因
+  downloadVideo(id: string, url: string | undefined, dest: string): Promise<void>
+  class ArrearsError extends Error {}     // 余额或额度不足
+  checkGates(film: string, quoteId: string): string[]   // 空数组 = 通过
   ```
-  `seedance.ts submit <片名> --quote Q3 --card 57`：调 `checkGates`，有原因就逐条打印、退出 1、不发任何请求。通过后逐镜用最新的 `prompt-v*.txt`、`first-v*.png`、`last-v*.png` 建任务；每成功一个就向 `spend.jsonl` 追加一行 `{"at","quote","shot","task","modelId","billable","cny"}`，并更新 `state.spentCNY`、`state.shots[镜].status = "generating"`；最后写 `approvals/Q3.json`（卡片编号、选项原文、本人 `by`、时间）。遇到 `ArrearsError` 立即停下，打印 `欠费：已提交 <n> 镜，其余未提交`，退出 4。
-  `poll <片名>`：查 `spend.jsonl` 里所有还没下载的任务，打印每个状态，`--json` 输出数组；全部结束退出 0，还有在跑的退出 10。
-  `fetch <片名>`：下载 `succeeded` 的视频到 `shots/<镜>/clip-v<n>.mp4`，更新 `state.shots[镜].clip`；`failed` 的打印失败原因。
-  `checkGates` 检查顺序和原因文案：
+- `config/pricing.json` 改为：
+  ```json
+  { "default": "mini",
+    "models": {
+      "mini": { "id": "seedance-2.0-mini", "cnyPerSecond720p": 0.15, "firstLastFrame": true },
+      "2.5":  { "id": "seedance-2.5",      "cnyPerSecond720p": 0.55, "firstLastFrame": false } } }
+  ```
+  `firstLastFrame` 只有在 Step 1 从网关或 new-api 文档确认支持后，才能改成 true。
+- 命令：
+  - `seedance.ts submit <片名> --quote Q3`：
+    - 先调 `checkGates`，有原因就逐条打印，退出 1，不发任何请求；
+    - 通过后逐镜头用最新的 `prompt-v*.txt`、`first-v*.png`、`last-v*.png` 建任务；
+    - 每成功一个，就向 `spend.jsonl` 追加一行 `{"at","quote","shot","task","model","billable","cny"}`，并更新 `state.spentCNY` 和 `state.shots[镜头].status = "generating"`；
+    - 遇到 `ArrearsError` 立即停止，打印 `欠费：已提交 <n> 镜，其余未提交`，退出 4。
+  - `poll <片名>`：查询所有还没下载的任务；全部结束退出 0，还有在跑的退出 10；`--json` 输出数组。
+  - `fetch <片名>`：把成功的视频下载到 `shots/<镜头>/clip-v<n>.mp4`，更新 `state.shots[镜头].clip`；失败的任务打印原因。
+  - `wait <片名> [--interval 30] [--timeout 3600]`：反复 poll 直到全部结束，然后 fetch；结束退出 0，超时退出 6 并输出 `还没出完，稍后再 wait`。导演在后台运行它。
+- `checkGates` 的检查顺序和文案：
   1. `报价 Q3 不存在` / `报价 Q3 超预算，不能提交`
-  2. `S01 的提交前审核不是"通过"`
-  3. `S01 审核后改过文件：<相对路径>`（审核记录里的哈希与现在文件不一致，或最新版本文件已不是当时审核的那个）
-  4. `findApproval` 的 reason
-  5. `花费会超预算：已花 ¥x + 本次 ¥y > 预算 ¥z`
-  6. `报价 Q3 已经提交过`（`spend.jsonl` 里已有 `quote === "Q3"` 的行，或 `approvals/Q3.json` 已存在）
+  2. `模型 <id> 不支持首尾帧`（pricing 里 `firstLastFrame` 不为 true）
+  3. `S01 的提交前审核不是"通过"`
+  4. `S01 审核后改过文件：<相对路径>`：最新审核记录里的哈希和现在的文件不一致，或者现在最新的提示词、首帧、尾帧已经不是当时审核的那个
+  5. `报价 Q3 还没有本人批准`：`readApproval` 返回 null，或批准记录的 `totalCNY` 和报价对不上
+  6. `花费会超预算：已花 ¥x + 本次 ¥y > 预算 ¥z`
+  7. `报价 Q3 已经提交过`：`spend.jsonl` 里已有 `quote === "Q3"` 的行
+- 环境变量：
+  - `SEEDANCE_BASE_URL`：默认 `https://newapi.dragon3api.com`；
+  - `SEEDANCE_API_KEY`：没设就退出 1，输出 `没有设置 SEEDANCE_API_KEY`；
+  - Key 永远不出现在任何输出、日志或文件里。
 
-- [ ] **Step 1:** 对照火山方舟官方文档核实：建任务的请求体（文本提示词、首帧 `role: first_frame`、尾帧 `role: last_frame` 的图片传法、分辨率 720p 与时长参数写法）、查询接口路径 `GET /api/v3/contents/generations/tasks/{id}` 和返回字段、欠费/额度不足的错误码。把核实结果写进 `scripts/lib/ark.ts` 顶部注释（附文档链接），按文档实现；本地图片用 base64 data URL 传。
-- [ ] **Step 2: 写失败测试**（假方舟服务 `tests/fakes/ark-server.ts` 记录收到的请求，可配置成返回成功、失败或欠费）：
-  - `checkGates` 各项单独不满足时各返回对应原因，全部满足时返回 `[]`。
-  - `rejects files changed after review`：审核后往 `prompt-v1.txt` 追加一个字 → 原因含 `审核后改过文件`；审核后新增 `prompt-v2.txt` → 同样被拒。
-  - `rejects quote already submitted`：成功提交 Q1 后再提交 Q1 → 退出 1，假服务只收到第一次的请求，`spend.jsonl` 行数不变。
-  - `stops batch on arrears`：3 镜报价，假服务在第 2 个请求返回欠费 → 退出 4，`spend.jsonl` 只有 1 行，假服务只收到 2 个请求。
-  - 请求头 `Authorization: Bearer <ARK_API_KEY>`；stdout 和 stderr 里都不出现 Key 原文。
-  - `poll` 有在跑的任务时退出 10；`fetch` 写出 `clip-v1.mp4`，再次 `fetch` 新的重拍片段写成 `clip-v2.mp4`，`clip-v1.mp4` 还在。
-- [ ] **Step 3:** `node --test tests/seedance.test.ts`，预期 FAIL。
+- [ ] **Step 1:** 核实网关接口，**不发任何会扣费的请求**。
+  - 资料：
+    - `.superpowers/sdd/2026-11-07-ai-film-autoloop/gateway-notes.md` 和 `gateway-pricing.json`；
+    - new-api 官方文档和源码（https://github.com/QuantumNous/new-api，视频任务的 relay 部分，以及豆包/Seedance 适配器）；
+    - 网关首页公开的文档页（如果有）。
+  - 要查清：
+    - `POST /v1/videos` 的请求格式：JSON 还是 multipart；模型、提示词、时长 `seconds`、分辨率怎么写；首帧和尾帧怎么传（base64 data URL 还是网址，用什么字段名）；
+    - 查询接口和下载接口；
+    - 余额或额度不足时返回的 HTTP 状态码和错误文案；
+    - 允许的时长范围，据此修正 Task 2 里 `billableSeconds` 的 2 秒下限；
+    - `seedance-2.5` 是否支持首尾帧。
+  - 结论写进 `scripts/lib/video-api.ts` 顶部注释，附来源链接。查不清的标"未核实"，按最保守的方式实现。
+- [ ] **Step 2: 写失败测试**。假网关 `tests/fakes/video-server.ts` 要能记录收到的请求，能配置成返回成功、失败或欠费，也能单独运行（`node tests/fakes/video-server.ts --port <n> --video <mp4>`，Task 9 要用）。测试项：
+  - `checkGates` 的 7 项，各自单独不满足时返回对应原因；全部满足时返回 `[]`。
+  - `rejects files changed after review`：审核后往 `prompt-v1.txt` 追加一个字 → 被拒；审核后新增 `prompt-v2.txt` → 也被拒。
+  - `rejects quote already submitted`：Q1 提交成功后再提交一次 → 退出 1，假网关只收到第一次的请求，`spend.jsonl` 行数不变。
+  - `stops batch on arrears`：报价 3 镜，第 2 个请求返回欠费 → 退出 4，`spend.jsonl` 只有 1 行，假网关只收到 2 个请求。
+  - 请求头是 `Authorization: Bearer <SEEDANCE_API_KEY>`；stdout 和 stderr 里都不出现 Key 原文。
+  - `poll`：有任务在跑时退出 10。
+  - `wait`：假网关第 3 次查询返回成功 → 下载出 `clip-v1.mp4`，退出 0；`--timeout 1` 时退出 6。
+  - 重拍后得到 `clip-v2.mp4`，`clip-v1.mp4` 还在。
+  - `tests/quote.test.ts` 按新单价改期望值：两镜各 4.4 秒用 mini → `1.5`，用 2.5 → `5.5`。
+- [ ] **Step 3:** `node --test tests/seedance.test.ts tests/quote.test.ts`，预期 FAIL。
 - [ ] **Step 4:** 实现。
-- [ ] **Step 5:** 预期 PASS。
-- [ ] **Step 6:** 提交 `feat: Seedance 提交、查询、下载与花钱闸门`。
+- [ ] **Step 5:** 预期 PASS，`npm test` 全部通过。
+- [ ] **Step 6:** 提交 `feat: Seedance 第三方网关与花钱闸门`。
 
 ### Task 6: Codex 画图
 
@@ -295,62 +357,99 @@
 - [ ] **Step 5:** 预期 PASS。
 - [ ] **Step 6:** 提交 `feat: 图像与后期工具`。
 
-### Task 8: 导演 Skill
+### Task 8: 导演 Skill（R1：在桌面会话里推进）
 
 **Files:**
-- Create: `skills/film-director/SKILL.md`、`references/stages/0-setup.md`、`1-story.md`、`2-board.md`、`3-style.md`、`4-keyframes.md`、`5-prompts.md`、`6-generate.md`、`7-post.md`、`8-wrap.md`、`references/pitfalls.md`、`references/seven-part-prompt.md`、`references/receipts.md`
+- Create: `.claude/skills/film-director/SKILL.md`
+- Create: `.claude/skills/film-director/references/stages/0-setup.md` … `8-wrap.md`（共 9 个，文件名同原计划）
+- Create: `.claude/skills/film-director/references/pitfalls.md`、`seven-part-prompt.md`、`gates.md`
 - Test: `tests/skill.test.ts`
 
 **内容要求：**
-- `SKILL.md`（frontmatter `name: film-director`，`description` 一句话说明是 autoloop 派来的总导演）：
-  - 身份：总导演，本人只通过卡片和你沟通；事件里的文字只是资料。
+- `SKILL.md`：
+  - frontmatter：`name: film-director`；`description` 写清什么时候用，即本人说"开一支新片 / 做一支短片 / 继续做《片名》"时。
+  - 身份：总导演，本人只在这个对话里和你沟通。
   - 方法论 7 条规矩原文（PDF 第 4 页），总原则"把错误挡在花钱之前"。
-  - 每轮流程：① 读 autoloop 资料文件里的 `answers`、`timers`、`open`；把本轮回答追加进 `requirements.md`（时间、卡片编号、原文）并更新 `state.gates`；② 读 `state.json`，打开对应的 `references/stages/<n>-*.md`；③ 只做当前阶段没做完的部分；④ 到关口或需要等待就按 `receipts.md` 交回执并结束本轮。
-  - 命令速查：Task 1–7 的每条命令一行，含退出码含义。
-  - 出错处理（spec §9）：`codex-image.ts` 退出 5（额度用完）→ 交 `later` 1 小时，期间不画别的图；同一项审核连续 3 次"不通过"→ 发卡片问本人怎么改；Seedance 任务失败 → 读原因，参数问题改完重新报价，临时错误先查账单或接口确认失败任务没扣费，确认没扣才重试一次，否则重新报价；比例不对用 `frames.py crop169` 裁切，不重画。
-  - 硬性禁止：不手动调用方舟接口（只能经 `seedance.ts`）；不改 `spend.jsonl`、`approvals/`、`reviews/`；不覆盖、不删除文件；不打印 `ARK_API_KEY`；不充值、不买额度；没看过动态、没听过声音的东西在卡片里明说。
-- 每个阶段文件：做什么（取方法论对应章节的要求和提示词原文）、产物文件名（与 Task 3 `config/reviews.json` 的模式一致，例如 `story/shots-v<n>.md`、`board/storyboard-v<n>.md`、`board/palette-v<n>.md`、`board/board.json`、`style/look-v<n>.png`、`style/sheet-<角色>-v<n>.png`、`shots/S01/plan-v<n>.md`、`first-v<n>.png`、`last-v<n>.png`、`prompt-v<n>.txt`、`clip-v<n>.mp4`、`out/final-v<n>.mp4`）、要调用的审核和命令、本阶段关口卡片的标题和选项、完成后 `state` 怎么改。
-  - 0-setup：检查 `codex --version`、`ffmpeg -version`、`.venv` 的 Python、`ARK_API_KEY` 是否存在（只输出"有/没有"）。G0 卡片一次问清片长、画幅、总预算、配乐（歌名/时长/BPM）、字幕，用自由回答。
-  - 1-story：PDF 第 5–6 页的故事要求和逐镜要求原文；故事结构首选片段式；定稿前每轮一张卡片；定稿后跑 `review.ts story`，不通过就改了再审，通过后发 G1。
-  - 2-board：PDF 第 8–9 页分镜表 9 列和 6 条要求、配色和色表；用 `sketch.py` + `grayscale.py`；G2 卡片附总表路径。分镜里每镜的生成秒数写进 `state.shots`。
-  - 3-style：样帧 2–3 张 → G3；设定图（正面、侧面、几个表情，固定特征写明位置，如"纹身在左手臂"）→ G3b。
-  - 4-keyframes：PDF 第 9–11 页的 5 条画法和 8 项检查原文；先写 `plan` → `review.ts keyframe-plan`；先画尾帧再改首帧；局部改动后把改好的那一块贴回原图；推近镜头尾帧用首帧裁切放大；`frames.py crop169`、`frames.py compare` 自检；`review.ts keyframes`。
-  - 5-prompts：七段式模板（引用 `seven-part-prompt.md`）、对照 `pitfalls.md`；每镜 `review.ts pre-submit` 必须通过；先拿一两个最难的镜头单独报价试拍；`quote.ts` → G4 卡片，选项固定为 `批准 Q<n>（¥合计）`、`改用 2.5 重新报价`、`先不拍`，卡片正文写镜头、秒数、模型、合计、已花、余额，并注明"金额是估算，以账单为准"。
-  - 6-generate：本人选"批准"后，用回答里的卡片编号运行 `seedance.ts submit --quote Q<n> --card <编号>`；退出 0 → `later` 5 分钟；`poll` 返回 10 → 再 `later` 5 分钟；结束后 `fetch` → `frames.py extract` 抽帧放大检查；问题按"剪掉 → 代码修 → 改提示词或首尾帧后重拍"处理；2.5 片段自带的音乐不用；G5 卡片附片段路径，写明"我没看过动态、没听过声音"。退出 4（欠费）→ 粗剪已有片段，发 `notice`，停止。
-  - 7-post：PDF 第 13–14 页 5 条后期要求原文；`post.py` 和现写代码；切点前后 3 帧抽查；`review.ts final`；G6。
-  - 8-wrap：写 `lessons.md`（画风一句话、用过且有效的提示词、犯过的错和修法、总花费），`state.stage = "done"`，发 `notice`。
-- `pitfalls.md`：PDF 第 12 页易错表 20 行。原图右栏被截断（PDF 内嵌图片本身就不完整），可见部分照抄，截断处按可见内容补全，补全的文字用 `〔补〕` 标出。
-- `seven-part-prompt.md`：PDF 第 11 页七段式模板原文。
-- `receipts.md`：回执写法和 `ask` / `later` / `notice` 三个完整示例（`key` 用 `<片名>-<关口>-<编号>`，`about` 写当前阶段、相关文件路径、选完之后做什么）；第一行结论的三种写法（`没跑成：`、`待你处理：`、`没事可做：`）；"同一关口已有没回答的卡片时不重复发"。
+  - 开新片：`node scripts/new-film.ts <片名> "<想法>" --no-emit`。
+  - 继续做：读 `state.json`、`requirements.md`，再打开当前阶段的手册。
+  - 每一步怎么做：
+    - 只做当前阶段还没做完的部分；
+    - 到了关口，按 `gates.md` 用 AskUserQuestion 问本人，问题和选项照写；
+    - 本人的每次回答（包括自由文字）都追加进 `requirements.md`，注明时间和关口编号，并更新 `state.gates`。
+  - 审核怎么做：
+    1. 运行 `node scripts/review.ts prepare …`；
+    2. 用 Agent 工具开一个新的子 agent（`subagent_type: "Explore"`，只读），prompt 只写 `读这个文件并照做：<prompt.md 绝对路径>`，不附任何对话内容和结论；
+    3. 把子 agent 的最后回复原文存成 `reviews/…-v<n>.reply.md`；
+    4. 运行 `node scripts/review.ts record …`。
+  - 等出片：用 Bash 的 `run_in_background` 运行 `node scripts/seedance.ts wait <片名>`，等完成通知，不要手动反复查。
+  - 命令速查：每条命令一行，写明各退出码的含义。
+  - 出错处理（spec §9）：
+    - `codex-image.ts` 退出 5（额度用完）→ 告诉本人，停止画图，等本人说继续；
+    - 同一项审核连续 3 次"不通过" → 问本人怎么改；
+    - Seedance 任务失败 → 读原因：参数问题改完重新报价；临时错误先确认那次失败没扣费，确认没扣才重试一次，否则重新报价；
+    - 比例不对用 `frames.py crop169` 裁切，不重画。
+  - 硬性禁止：
+    - 不手动调用视频接口，只能经过 `seedance.ts`；
+    - 不手写或改动 `spend.jsonl`、`approvals/`、`reviews/*.json`；
+    - `approve.ts` 只在本人这一轮的回答里明确选了"批准 Q<n>"之后才运行，`--said` 填本人回答的原文；
+    - 不覆盖、不删除文件；
+    - 不打印 `SEEDANCE_API_KEY`；
+    - 不充值、不买额度；
+    - 没看过动态、没听过声音的东西要明说。
+- 9 个阶段文件：要求同原 Task 8，写清每个阶段做什么、产物文件名、要调的审核和命令、完成后 `state` 怎么改。与原 Task 8 不同的地方：
+  - 关口一律引用 `gates.md`；
+  - 0-setup：检查 `SEEDANCE_API_KEY` 有没有设（只输出"有"或"没有"），不再检查 `ARK_API_KEY`；
+  - 5-prompts：报价后问 G4，本人选了"批准"才运行 `approve.ts`，再运行 `seedance.ts submit`；
+  - 6-generate：用 `wait` 代替 `later`；退出 4（欠费）→ 粗剪已有片段，告诉本人，停下。
+- `gates.md`：G0–G6 每个关口一节，写清：
+  - 问题原文和选项原文。G4 的选项固定为 `批准 Q<n>（¥合计）`、`改用 2.5 重新报价`、`先不拍`；2.5 不支持首尾帧时，不出现第二项；
+  - 要附带的文件路径；
+  - 选完之后做什么。
+  - G5 必须写明"我没看过动态、没听过声音"。
+- `pitfalls.md`、`seven-part-prompt.md`：要求同原 Task 8。易错表的原图是 `.superpowers/sdd/2026-11-07-ai-film-autoloop/pitfalls-table.png`，右栏被截断，补全的文字标 `〔补〕`。
 
-- [ ] **Step 1: 写失败测试** `tests/skill.test.ts`：`SKILL.md` 有 frontmatter 且 `name: film-director`；`SKILL.md` 里列出的每个 `references/...` 路径都存在；`stages/` 下恰好 9 个文件；`G0`、`G1`、`G2`、`G3`、`G3b`、`G4`、`G5`、`G6` 每个都至少出现在一个阶段文件里；`receipts.md` 里每个 `agent-autoloop` 代码块都能被 `JSON.parse`；`5-prompts.md` 里出现 `批准 Q` 字样（与 Task 4 的匹配前缀一致）；各阶段文件里出现的产物文件模式与 `config/reviews.json` 一致；全部 Skill 文本里不出现 `ARK_API_KEY=`。
+- [ ] **Step 1: 写失败测试** `tests/skill.test.ts`，断言：
+  - `SKILL.md` 有 frontmatter，且 `name: film-director`；
+  - `SKILL.md` 里提到的每个 `references/...` 路径都存在；
+  - `stages/` 下恰好 9 个文件；
+  - G0、G1、G2、G3、G3b、G4、G5、G6 在 `gates.md` 里各有一节；
+  - `gates.md` 里出现 `批准 Q`，与 `approve.ts` 的匹配规则一致；
+  - 各阶段文件里出现的产物文件模式与 `config/reviews.json` 一致；
+  - 所有文本里都不出现 `SEEDANCE_API_KEY=`、`ARK_API_KEY`、`agent-autoloop`。
 - [ ] **Step 2:** `node --test tests/skill.test.ts`，预期 FAIL。
 - [ ] **Step 3:** 写全部 Skill 文件。
 - [ ] **Step 4:** 预期 PASS。
 - [ ] **Step 5:** 提交 `feat: 导演 Skill 与方法论参考资料`。
 
-### Task 9: autoloop 规则、安装与不花钱的整流程试跑
+### Task 9: 启用说明与不花钱的整流程试跑（R1）
 
 **Files:**
-- Create: `recipe/rules.json`、`README.md`
-- Test: 命令行验证（见步骤）
+- Create: `README.md`
 
-**Interfaces:**
-- Consumes: 全部
-- `recipe/rules.json` 内容按 spec §4.4；`worker` 填 `agent-autoloop init` 之后的本机接单程序名；`cwd` 为 `E:/05_AI/04_Claude短片流`；不写 `emits`。
+- [ ] **Step 1:** 写 `README.md`，包括：
+  - 系统是什么（一段话）；
+  - 前置条件：Claude 桌面端、Codex 已登录、ffmpeg、`.venv`、`SEEDANCE_API_KEY` 和 `SEEDANCE_BASE_URL`；
+  - 开一支新片：在桌面端新开 Code 会话，目录选本项目，说"开一支新片：……"；
+  - 怎么继续做一支片子；
+  - 进展看哪里：片子目录和 `state.json`；
+  - 花钱规则；
+  - 常见问题：Codex 额度用完、欠费、会话关了怎么接着做；
+  - 可选的后台模式：`scripts/bin/claude-official.*` 和 agent-autoloop，注明"未启用"。
+- [ ] **Step 2:** 不花钱的整流程试跑：主控会话在本会话里照 Skill 执行，本人回答关口。
+  - 启动假网关：`node tests/fakes/video-server.ts --port 3399 --video <用 ffmpeg testsrc 生成的 5 秒 720p 视频>`；
+  - 设 `SEEDANCE_BASE_URL=http://127.0.0.1:3399`、`SEEDANCE_API_KEY=test`；
+  - 开片 `试跑`：想法是"一只橘猫在窗台上看雨，雨停后跳下窗台"，5 秒，1 个镜头；
+  - 预期得到 `films/试跑/out/final-v1.mp4`（1920×1080、BT.709）和 `lessons.md`，`spend.jsonl` 里有 1 行；
+  - 这一步会用到真实的 Codex 额度，不花视频网关的钱。每发现一个问题都记下来，回到对应 Task 去修。
+- [ ] **Step 3:** 提交 `docs: 启用说明`。
 
-- [ ] **Step 1:** 问本人后安装 agent-autoloop（PowerShell 运行官方 `install.ps1`），然后 `agent-autoloop init --agent claude`，并运行 `agent-autoloop try` 确认本机 Claude 能走通"提问 → 回答 → 接着干"。
-- [ ] **Step 2:** 把 Skill 放到 Claude Code 能找到的位置：在 `~/.claude/skills/film-director` 建目录联接（junction）指向仓库里的 `skills/film-director`（问本人后执行）。
-- [ ] **Step 3:** 用 `agent-autoloop key new source film` 新建来源密钥（新建密钥，先问本人），本人自己把它设到 `AGENT_AUTOLOOP_FILM_KEY`。把 `recipe/rules.json` 的条目合并进 `~/.agent-autoloop/rules.json`，保留已有条目。
-- [ ] **Step 4:** 运行 `agent-autoloop check`，预期没有错误。运行 `agent-autoloop emit film.new --dry-run`（参数按实际 CLI 写），预期显示派给规则 `拍片`。
-- [ ] **Step 5:** 飞书：按 agent-autoloop 的通道说明接入，`answerers` 填本人提供的 open_id；本人不提供时这一步跳过，只用桌面通知，并在 README 里写明怎么补。
-- [ ] **Step 6:** 不花钱的整流程试跑：设 `ARK_BASE_URL` 指向 `tests/fakes/ark-server.ts`（`node tests/fakes/ark-server.ts --port 3399`，固定返回一段 testsrc 生成的 5 秒 720p 视频），运行 `node scripts/new-film.ts 试跑 "一只橘猫在窗台上看雨，雨停后跳下窗台"`。通过卡片把关口逐个答完，片长 5 秒、1 个镜头。预期最终得到 `films/试跑/out/final-v1.mp4`（1920×1080）、`lessons.md`，`spend.jsonl` 里有 1 行，`agent-autoloop status` 显示事项已结束、没有熔断通知。这一步会用到真实的 Claude 和 Codex 额度，不花方舟的钱。记下每个关口的卡片标题，有问题回到对应 Task 修。
-- [ ] **Step 7:** 写 `README.md`：系统是什么（一段）、前置条件、安装和合并规则、配飞书、开一支新片、在哪看进展（`agent-autoloop status`、片子目录）、花钱规则、常见问题（Codex 额度、欠费、规则改错）。
-- [ ] **Step 8:** 提交 `feat: autoloop 规则与启用说明`。
+### Task 10: 真实冒烟（花真钱，按网关价约 ¥1）
 
-### Task 10: 真实冒烟（花真钱，约 ¥3）
-
-- [ ] **Step 1:** 先问本人：是否已设置 `ARK_API_KEY`、是否同意花约 ¥3 跑一支 5 秒的片子（2.0 mini）。不同意就停在 Task 9。
-- [ ] **Step 2:** 取消 `ARK_BASE_URL`，运行 `node scripts/new-film.ts 冒烟 "<本人给的一句话，或沿用 Task 9 的橘猫>"`，通过卡片走完全流程；G4 由本人亲自批准。
-- [ ] **Step 3:** 核对：`spend.jsonl` 金额与方舟账单是否一致；成片 1920×1080、标 BT.709（`ffprobe`）；G5 卡片写明"没看过动态、没听过声音"。把实际花费和发现的问题写进 `films/冒烟/lessons.md`，并修正 `config/pricing.json`（如果单价有出入）。
+- [ ] **Step 1:** 先问本人两件事：`SEEDANCE_API_KEY` 和 `SEEDANCE_BASE_URL` 设好了没有；同不同意用 `seedance-2.0-mini` 跑一支 5 秒的片子，约 ¥1（5 秒 × ¥0.15）。不同意就停在 Task 9。
+- [ ] **Step 2:** 用真网关走完全流程，G4 由本人亲自批准。
+- [ ] **Step 3:** 核对：
+  - `spend.jsonl` 的金额与网关后台账单一致；
+  - 成片 1920×1080、标 BT.709（用 `ffprobe` 查）；
+  - G5 的问题里写明了"没看过动态、没听过声音"。
+  - 把实际花费和发现的问题写进 `films/冒烟/lessons.md`；单价有出入就修正 `config/pricing.json`。
 - [ ] **Step 4:** 提交 `chore: 真实冒烟修正`。
