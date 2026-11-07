@@ -4,7 +4,16 @@ import { assertFilmName, filmDir } from "./lib/paths.ts";
 import { readState, writeState } from "./lib/state.ts";
 import { latestVersionPath, nextVersionPath, writeNew } from "./lib/versioned.ts";
 import { sha256File } from "./lib/hash.ts";
-import { latestReviewPath, readPricing, readSpendRows, round1, spentFromLog, type Quote, type SpendRow } from "./quote.ts";
+import {
+  latestReviewPath,
+  readPricing,
+  readSpendRows,
+  round1,
+  spentFromLog,
+  spentFromRows,
+  type Quote,
+  type SpendRow,
+} from "./quote.ts";
 import { readApproval } from "./approve.ts";
 import {
   apiKey,
@@ -24,7 +33,8 @@ const USAGE =
   "用法：seedance.ts submit <片名> --quote Q<n>\n" +
   "      seedance.ts poll <片名> [--json]\n" +
   "      seedance.ts fetch <片名>\n" +
-  "      seedance.ts wait <片名> [--interval 30] [--timeout 3600]";
+  "      seedance.ts wait <片名> [--interval 30] [--timeout 3600]\n" +
+  '      seedance.ts reconcile <片名> --quote Q<n> --shot S01 (--task <任务号> | --not-created) --note "<本人说明>"';
 const QUOTE_ID_RE = /^Q\d+$/;
 const SHOT_RE = /^[A-Za-z0-9_]{1,20}$/;
 const EPS = 1e-9;
@@ -177,7 +187,7 @@ export function checkGates(film: string, quoteId: string): string[] {
   }
   const budget = state?.settings?.budgetCNY;
   if (rows) {
-    const spent = rows.reduce((a, r) => a + r.cny, 0);
+    const spent = spentFromRows(rows);
     if (!isFiniteNum(budget) || budget < 0) {
       g[6].push(budget === null || budget === undefined ? "还没有设总预算" : `总预算不合法：${JSON.stringify(budget)}`);
     } else if (!(spent + rawTotal <= budget + EPS)) {
@@ -336,7 +346,7 @@ async function submit(args: string[]): Promise<number> {
           }
           console.error(
             `${shot} 提交结果不明（${scrub(err.message)}）：可能已经建了任务并扣费，已按 ¥${cny.toFixed(2)} 记入 spend.jsonl。` +
-              "请到网关的任务日志核对，不要直接重发。",
+              "请到网关的任务日志核对，不要直接重发；查清后由本人决定运行 reconcile 记下结果。",
           );
           console.error(`已提交 ${n} 镜，其余未提交`);
           return 1;
@@ -424,13 +434,18 @@ function doneTasks(dir: string): Set<string> {
 function pendingTasks(dir: string, warned: Set<string> = new Set()): Pending[] {
   const done = doneTasks(dir);
   const current = baseUrl();
+  const rows = readSpendRows(dir);
+  // 核对为"建成了"的任务：网关地址取那条结果不明的提交行
+  const uncertainBase = new Map<string, string | undefined>();
+  for (const r of rows) if (r.uncertain === true && r.reconcile === undefined) uncertainBase.set(JSON.stringify([r.quote, r.shot]), r.baseUrl);
   const out: Pending[] = [];
   const seen = new Set<string>();
-  for (const r of readSpendRows(dir)) {
+  for (const r of rows) {
     if (typeof r.task !== "string" || !r.task || typeof r.shot !== "string") continue;
+    if (r.reconcile !== undefined && r.reconcile !== "created") continue;
     if (done.has(r.task) || seen.has(r.task)) continue;
     seen.add(r.task);
-    const at = normBase(r.baseUrl);
+    const at = normBase(r.reconcile === "created" ? uncertainBase.get(JSON.stringify([r.quote, r.shot])) : r.baseUrl);
     if (at !== current) {
       if (!warned.has(r.task)) console.error(`${r.shot} 的任务是在 ${at} 提交的，当前网关地址不同，跳过`);
       warned.add(r.task);
@@ -589,8 +604,92 @@ async function wait(args: string[]): Promise<number> {
   }
 }
 
+const TASK_ID_RE = /^[A-Za-z0-9_.:-]{1,200}$/;
+
+/**
+ * 核对一次"结果不明"的提交（本人到网关后台查清之后，由本人决定执行）。只往 spend.jsonl 追加一行核对记录，不改旧行：
+ *   --task <id>     建成了：之后 poll / fetch / wait 把这个任务当作这一镜的任务去查、去下载（已花金额不变）；
+ *   --not-created   没建成：统计已花金额时不再算那条 uncertain 行（spentFromRows）。
+ * 只有这一镜在这份报价里有 uncertain 行、而且还没核对过时才执行，否则退出 1。不联网，不需要 Key。
+ * 闸门 7 照旧：这份报价不能再提交，要重拍就重新报价。
+ */
+async function reconcile(args: string[]): Promise<number> {
+  const [filmRaw, ...rest] = args;
+  let quoteId: string | undefined;
+  let shot: string | undefined;
+  let task: string | undefined;
+  let notCreated = false;
+  let note: string | undefined;
+  for (let i = 0; i < rest.length; i++) {
+    const has = i + 1 < rest.length;
+    if (rest[i] === "--quote" && has) quoteId = rest[++i];
+    else if (rest[i] === "--shot" && has) shot = rest[++i];
+    else if (rest[i] === "--task" && has) task = rest[++i];
+    else if (rest[i] === "--note" && has) note = rest[++i];
+    else if (rest[i] === "--not-created") notCreated = true;
+    else return usage();
+  }
+  const film = filmArg(filmRaw);
+  if (!film || !quoteId || !QUOTE_ID_RE.test(quoteId) || !shot || !SHOT_RE.test(shot)) return usage();
+  if ((task === undefined) === !notCreated) return usage(); // --task 和 --not-created 恰好给一个
+  if (task !== undefined && !TASK_ID_RE.test(task)) return usage();
+  if (note === undefined || !note.trim()) return usage();
+
+  const dir = filmDir(film);
+  if (readJson(join(dir, LOCK)) !== undefined) {
+    console.error(`另一个提交的锁还在（films/${film}/${LOCK}），先处理它再核对`);
+    return 1;
+  }
+  let rows: SpendRow[];
+  try {
+    rows = readSpendRows(dir);
+  } catch (err) {
+    console.error((err as Error).message);
+    return 1;
+  }
+  const same = (r: SpendRow) => r.quote === quoteId && r.shot === shot;
+  if (!rows.some((r) => same(r) && r.uncertain === true && r.reconcile === undefined)) {
+    console.error(`报价 ${quoteId} 的 ${shot} 没有结果不明（uncertain）的提交记录，不用核对`);
+    return 1;
+  }
+  if (rows.some((r) => same(r) && r.reconcile !== undefined)) {
+    console.error(`报价 ${quoteId} 的 ${shot} 已经核对过，不能再核对`);
+    return 1;
+  }
+  if (task !== undefined && rows.some((r) => r.task === task)) {
+    console.error(`任务 ${task} 已经记在 spend.jsonl 里了`);
+    return 1;
+  }
+  const row = {
+    at: new Date().toISOString(),
+    quote: quoteId,
+    shot,
+    reconcile: notCreated ? "not-created" : "created",
+    ...(task !== undefined ? { task } : {}),
+    note,
+  };
+  try {
+    io.appendJsonl(join(dir, "spend.jsonl"), row);
+  } catch (err) {
+    console.error(`写 spend.jsonl 失败（${scrub((err as Error).message)}），没有记下核对`);
+    return 1;
+  }
+  try {
+    io.updateShot(film, shot, notCreated ? {} : { status: "generating" }, spentFromLog(dir));
+  } catch (err) {
+    console.error(`警告：核对已记入 spend.jsonl，但 state.json 没有更新（${scrub((err as Error).message)}）`);
+  }
+  if (notCreated) {
+    console.log(`已核对：报价 ${quoteId} 的 ${shot} 没有建成任务，已花金额不再算这一镜；要拍就重新报价`);
+  } else {
+    console.log(`已核对：报价 ${quoteId} 的 ${shot} 是任务 ${task}；用 wait 等出片`);
+  }
+  return 0;
+}
+
 export async function main(argv: string[]): Promise<number> {
   const [cmd, ...args] = argv;
+  if (cmd === "reconcile") return reconcile(args);
   if (cmd === "submit") return submit(args);
   if (cmd === "poll") return poll(args);
   if (cmd === "fetch") return fetchCmd(args);

@@ -226,3 +226,32 @@ test("计费秒数超过模型单镜上限（mini 15 秒）：退出 2，不写�
     assert.equal(buildQuote(FILM, ["S02"]).shots[0].billable, 15);
   });
 });
+
+test("I2：spentFromRows 扣掉核对为没建成的 uncertain 行，不会变成负数；核对行本身不算钱", async () => {
+  const { spentFromRows } = await import("../scripts/quote.ts");
+  const rows = [
+    { quote: "Q1", shot: "S01", task: "t1", cny: 0.75 },
+    { quote: "Q2", shot: "S01", task: null, uncertain: true, cny: 0.75 },
+    { quote: "Q2", shot: "S02", task: null, uncertain: true, cny: 1.5 },
+    { quote: "Q2", shot: "S01", reconcile: "not-created", note: "x", cny: 0 },
+    { quote: "Q2", shot: "S02", reconcile: "created", task: "t9", note: "x", cny: 0 },
+  ];
+  assert.ok(Math.abs(spentFromRows(rows as any) - 2.25) < 1e-9);
+  assert.equal(spentFromRows([{ quote: "Q3", shot: "S01", reconcile: "not-created", note: "x", cny: 0 }] as any), 0);
+});
+
+test("I2：spend.jsonl 里的核对行（没有 cny）可以读；坏的核对行报错", async () => {
+  await withFilm({ budget: 100, shots: { S01: 4.4 } }, (dir) => {
+    const lines = [
+      { quote: "Q1", shot: "S01", task: null, uncertain: true, cny: 0.75 },
+      { at: "2026-11-08T00:00:00Z", quote: "Q1", shot: "S01", reconcile: "not-created", note: "没建成" },
+    ];
+    writeFileSync(join(dir, "spend.jsonl"), lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+    review(dir, "S01", 1, "pass");
+    assert.equal(buildQuote(FILM, ["S01"]).spentCNY, 0);
+    writeFileSync(join(dir, "spend.jsonl"), JSON.stringify({ quote: "Q1", shot: "S01", reconcile: "maybe", note: "x" }) + "\n");
+    assert.throws(() => buildQuote(FILM, ["S01"]), /spend\.jsonl 第 1 行/);
+    writeFileSync(join(dir, "spend.jsonl"), JSON.stringify({ quote: "Q1", shot: "S01", reconcile: "not-created", note: "x", cny: -1 }) + "\n");
+    assert.throws(() => buildQuote(FILM, ["S01"]), /spend\.jsonl 第 1 行/);
+  });
+});

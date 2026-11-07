@@ -637,3 +637,107 @@ test("I1：旧的 spend 行没有 baseUrl 时按默认地址算；当前地址�
     assert.deepEqual(fetchedLines(c.dir), []);
   });
 });
+
+// ---------- 终审 I2：结果不明的提交由本人核对 ----------
+
+/** 提交时连接断开 → S01 一行 uncertain。返回报价号。 */
+async function uncertainSubmit(c: Ctx): Promise<string> {
+  const id = await quoteAndApprove("S01,S02");
+  assert.equal(await main(["submit", FILM, "--quote", id]), 1);
+  const rows = spendLines(c.dir);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].uncertain, true);
+  return id;
+}
+
+test("I2：reconcile --task 之后 wait 能下载到这一镜；只追加一行，旧行不变", async () => {
+  await withFilm({ gw: { creates: ["crash"], known: ["task_lost01"] } }, async (c) => {
+    const id = await uncertainSubmit(c);
+    const before = readFileSync(join(c.dir, "spend.jsonl"), "utf8");
+    c.out.length = 0;
+    assert.equal(await main(["reconcile", FILM, "--quote", id, "--shot", "S01", "--task", "task_lost01", "--note", "网关后台查到了"]), 0, c.out.join("\n"));
+    const after = readFileSync(join(c.dir, "spend.jsonl"), "utf8");
+    assert.ok(after.startsWith(before));
+    const rows = spendLines(c.dir);
+    assert.equal(rows.length, 2);
+    assert.deepEqual(Object.keys(rows[1]).sort(), ["at", "note", "quote", "reconcile", "shot", "task"]);
+    assert.equal(rows[1].reconcile, "created");
+    assert.equal(rows[1].task, "task_lost01");
+    assert.equal(rows[1].note, "网关后台查到了");
+    assert.equal(readState(FILM).shots.S01.status, "generating");
+    assert.equal(await main(["wait", FILM, "--interval", "0", "--timeout", "30"]), 0);
+    assert.ok(existsSync(join(c.dir, "shots", "S01", "clip-v1.mp4")));
+    assert.equal(readState(FILM).shots.S01.clip, "shots/S01/clip-v1.mp4");
+    // 已花金额不变（建成了就是花了）；同一报价仍不能再提交
+    assert.ok(Math.abs(readState(FILM).spentCNY - 0.75) < 1e-9);
+    assert.deepEqual(checkGates(FILM, id), [`报价 ${id} 已经提交过`]);
+    assert.equal(c.gw.creates().length, 1);
+    noKey(c);
+  });
+});
+
+test("I2：reconcile --not-created 之后已花金额扣掉那一行；quote.ts 和闸门 6 用同一个数；闸门 7 照旧", async () => {
+  await withFilm({ gw: { creates: ["crash"] } }, async (c) => {
+    const id = await uncertainSubmit(c);
+    assert.ok(Math.abs(readState(FILM).spentCNY - 0.75) < 1e-9);
+    assert.equal(await main(["reconcile", FILM, "--quote", id, "--shot", "S01", "--not-created", "--note", "后台没有这个任务，也没扣费"]), 0);
+    const rows = spendLines(c.dir);
+    assert.equal(rows.length, 2);
+    assert.equal(rows[1].reconcile, "not-created");
+    assert.equal(rows[1].task, undefined);
+    assert.equal(rows[1].cny, undefined);
+    assert.equal(readState(FILM).spentCNY, 0);
+    assert.deepEqual(checkGates(FILM, id), [`报价 ${id} 已经提交过`]);
+    // 新报价的"已花"是 0
+    assert.equal(await quote([FILM, "--shots", "S01"]), 0);
+    assert.match(c.out.at(-1)!, /已花 ¥0\.0，预算余 ¥100\.0$/);
+    // 没建成的镜头没有任务可查
+    const before = c.gw.requests.length;
+    assert.equal(await main(["poll", FILM]), 0);
+    assert.equal(c.gw.requests.length, before);
+  });
+});
+
+test("I2：没有 uncertain 行时 reconcile 退出 1，不写任何东西", async () => {
+  await withFilm({}, async (c) => {
+    const id = await quoteAndApprove("S01,S02");
+    assert.equal(await main(["reconcile", FILM, "--quote", id, "--shot", "S01", "--not-created", "--note", "x"]), 1);
+    assert.equal(await main(["submit", FILM, "--quote", id]), 0);
+    const before = readFileSync(join(c.dir, "spend.jsonl"), "utf8");
+    c.out.length = 0;
+    assert.equal(await main(["reconcile", FILM, "--quote", id, "--shot", "S01", "--task", "task_x", "--note", "x"]), 1);
+    assert.match(c.out.at(-1)!, /没有结果不明/);
+    assert.equal(readFileSync(join(c.dir, "spend.jsonl"), "utf8"), before);
+  });
+});
+
+test("I2：同一镜头不能重复核对（无论哪种），退出 1", async () => {
+  await withFilm({ gw: { creates: ["crash"] } }, async (c) => {
+    const id = await uncertainSubmit(c);
+    assert.equal(await main(["reconcile", FILM, "--quote", id, "--shot", "S01", "--not-created", "--note", "没建成"]), 0);
+    c.out.length = 0;
+    assert.equal(await main(["reconcile", FILM, "--quote", id, "--shot", "S01", "--not-created", "--note", "再来"]), 1);
+    assert.match(c.out.at(-1)!, /已经核对过/);
+    assert.equal(await main(["reconcile", FILM, "--quote", id, "--shot", "S01", "--task", "task_y", "--note", "再来"]), 1);
+    assert.equal(spendLines(c.dir).length, 2);
+    assert.equal(readState(FILM).spentCNY, 0);
+  });
+});
+
+test("I2：reconcile 参数不对退出 2（缺 --note、两种都给、都不给、报价号不合法）", async () => {
+  await withFilm({ gw: { creates: ["crash"] } }, async (c) => {
+    const id = await uncertainSubmit(c);
+    for (const argv of [
+      ["reconcile", FILM, "--quote", id, "--shot", "S01", "--not-created"],
+      ["reconcile", FILM, "--quote", id, "--shot", "S01", "--not-created", "--note", "  "],
+      ["reconcile", FILM, "--quote", id, "--shot", "S01", "--task", "t1", "--not-created", "--note", "x"],
+      ["reconcile", FILM, "--quote", id, "--shot", "S01", "--note", "x"],
+      ["reconcile", FILM, "--quote", "q1", "--shot", "S01", "--not-created", "--note", "x"],
+      ["reconcile", FILM, "--shot", "S01", "--not-created", "--note", "x"],
+      ["reconcile", FILM, "--quote", id, "--shot", "S01", "--task", "a b", "--note", "x"],
+    ]) {
+      assert.equal(await main(argv), 2, JSON.stringify(argv));
+    }
+    assert.equal(spendLines(c.dir).length, 1);
+  });
+});

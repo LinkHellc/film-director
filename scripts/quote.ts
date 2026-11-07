@@ -27,7 +27,10 @@ export interface Pricing {
   models: Record<Model, { id: string; cnyPerSecond720p: number; firstLastFrame?: boolean; maxSeconds?: number }>;
 }
 
-/** spend.jsonl 的一行。submit 写 {at,quote,shot,task,model,billable,cny,baseUrl}；结果不明时 task 为 null 且 uncertain 为 true。 */
+/**
+ * spend.jsonl 的一行。submit 写 {at,quote,shot,task,model,billable,cny,baseUrl}；结果不明时 task 为 null 且 uncertain 为 true。
+ * seedance.ts reconcile 追加核对行 {at,quote,shot,reconcile:"created"|"not-created",task?,note}（文件里没有 cny，读进来按 0）。
+ */
 export interface SpendRow {
   at?: string;
   quote?: string;
@@ -39,6 +42,8 @@ export interface SpendRow {
   uncertain?: boolean;
   /** 提交时的网关地址（旧行没有，按默认地址算）。 */
   baseUrl?: string;
+  reconcile?: "created" | "not-created";
+  note?: string;
 }
 
 const USAGE = "用法：quote.ts <片名> --shots S01,S02 [--model mini|2.5]";
@@ -112,11 +117,22 @@ export function readSpendRows(dir: string): SpendRow[] {
   const lines = raw.split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
     if (!lines[i].trim()) continue;
-    let row: { cny?: unknown } | null;
+    let row: { cny?: unknown; reconcile?: unknown; quote?: unknown; shot?: unknown; task?: unknown; note?: unknown } | null;
     try {
       row = JSON.parse(lines[i]);
     } catch {
       throw new Error(`spend.jsonl 第 ${i + 1} 行不是合法的 JSON`);
+    }
+    if (row && typeof row === "object" && Object.hasOwn(row, "reconcile")) {
+      // 核对行：不带钱（cny 只能没有或为 0），必须写明报价、镜头、结论、说明；created 要有任务号
+      const ok =
+        (row.reconcile === "created" || row.reconcile === "not-created") &&
+        typeof row.quote === "string" && typeof row.shot === "string" && typeof row.note === "string" &&
+        (row.reconcile === "not-created" || (typeof row.task === "string" && row.task.length > 0)) &&
+        (row.cny === undefined || row.cny === 0);
+      if (!ok) throw new Error(`spend.jsonl 第 ${i + 1} 行的核对记录不合法`);
+      rows.push({ ...(row as SpendRow), cny: 0 });
+      continue;
     }
     const cny = row?.cny;
     if (typeof cny !== "number" || !Number.isFinite(cny) || cny < 0) {
@@ -127,9 +143,25 @@ export function readSpendRows(dir: string): SpendRow[] {
   return rows;
 }
 
-/** spend.jsonl 各行 cny 之和（不四舍五入）；文件不存在为 0；坏行抛错。 */
+/**
+ * 已花金额（不四舍五入）：各提交行 cny 之和，减去被核对为"没建成"（reconcile: "not-created"）的那条 uncertain 行。
+ * 核对行本身不算钱；只是不计入某一行，所以不会小于 0。quote.ts、seedance.ts 都只用这个函数算已花。
+ */
+export function spentFromRows(rows: SpendRow[]): number {
+  const key = (r: SpendRow) => JSON.stringify([r.quote, r.shot]);
+  const notCreated = new Set(rows.filter((r) => r.reconcile === "not-created").map(key));
+  let sum = 0;
+  for (const r of rows) {
+    if (r.reconcile !== undefined) continue;
+    if (r.uncertain === true && notCreated.has(key(r))) continue;
+    sum += r.cny;
+  }
+  return sum;
+}
+
+/** spend.jsonl 算出的已花金额（见 spentFromRows）；文件不存在为 0；坏行抛错。 */
 export function spentFromLog(dir: string): number {
-  return readSpendRows(dir).reduce((a, r) => a + r.cny, 0);
+  return spentFromRows(readSpendRows(dir));
 }
 
 function nextQuoteId(dir: string): string {
