@@ -1,0 +1,19 @@
+{
+  "story": ["story/shots-v*.md"],
+  "keyframe-plan": ["shots/<镜头>/plan-v*.md", "board/storyboard-v*.md"],
+  "keyframes": [
+    "shots/<镜头>/first-v*.png",
+    "shots/<镜头>/last-v*.png",
+    "style/sheet-*-v*.png",
+    "shots/<镜头>/plan-v*.md"
+  ],
+  "pre-submit": [
+    "shots/<镜头>/prompt-v*.txt",
+    "shots/<镜头>/first-v*.png",
+    "shots/<镜头>/last-v*.png",
+    "style/sheet-*-v*.png",
+    "board/storyboard-v*.md",
+    "board/palette-v*.md"
+  ],
+  "final": ["out/final-v*.mp4", "out/final-v*-frames/"]
+}
