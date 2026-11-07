@@ -41,6 +41,19 @@ export function parseOut(kind: Kind, out: string): { dir: string; base: string }
   return { dir: `shots/${parts[1]}`, base: kind };
 }
 
+/**
+ * 输出里是否有额度报错。真 codex 会在开头回显提示词（user 下面那段），
+ * 所以先去掉与本次提示词相同的行，免得提示词里的 quota/额度 被误判。
+ */
+export function quotaError(output: string, sentPrompt: string): boolean {
+  const norm = (l: string) => l.trim();
+  const promptLines = new Set(sentPrompt.split(/\r?\n/).map(norm).filter(Boolean));
+  return output
+    .split(/\r?\n/)
+    .filter((l) => !promptLines.has(norm(l)))
+    .some((l) => QUOTA_RE.test(l));
+}
+
 /** 从 PNG 文件头（IHDR）读宽高；不是 PNG 返回 null。 */
 export function pngSize(buf: Uint8Array): { width: number; height: number } | null {
   const sig = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
@@ -179,7 +192,8 @@ export async function main(argv: string[]): Promise<number> {
   ];
   // 留 1 秒余量，防文件系统时间精度/时钟取整把本次的图漏掉
   const started = Date.now() - 1000;
-  const res = await run(cmd, { cwd: dir, stdin: withPrefix(prompt), timeoutMs: TIMEOUT_MS });
+  const sent = withPrefix(prompt);
+  const res = await run(cmd, { cwd: dir, stdin: sent, timeoutMs: TIMEOUT_MS });
   const output = `${res.stdout}\n${res.stderr}`;
 
   const session = SESSION_RE.exec(output)?.[1];
@@ -188,7 +202,7 @@ export async function main(argv: string[]): Promise<number> {
 
   if (!image) {
     const tail = res.stderr.trim().split(/\r?\n/).slice(-3).join("\n");
-    if (QUOTA_RE.test(output)) {
+    if (quotaError(output, sent)) {
       console.error("Codex 额度用完");
       if (tail) console.error(tail);
       return 5;

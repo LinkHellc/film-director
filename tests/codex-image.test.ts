@@ -166,6 +166,22 @@ test("quota error exits 5", async () => {
   });
 });
 
+test("quota words echoed from the prompt are not a quota error", async () => {
+  const PROMPT = "画一个写着 quota、rate limit、额度 的告示牌。\r\n第二行也提到 Quota。";
+  await withFilm({ gates: ["G1"], mode: "noimage" }, async (c) => {
+    writeFileSync(join(c.root, "prompt.txt"), PROMPT);
+    assert.equal(await main(args(c, "style", "style/look")), 3);
+    assert.match(text(c), /Codex 没有出图/);
+    assert.doesNotMatch(text(c), /Codex 额度用完/);
+  });
+  // 同样的提示词，真有额度报错行时仍然退出 5
+  await withFilm({ gates: ["G1"], mode: "noimage,quota" }, async (c) => {
+    writeFileSync(join(c.root, "prompt.txt"), PROMPT);
+    assert.equal(await main(args(c, "style", "style/look")), 5);
+    assert.match(text(c), /Codex 额度用完/);
+  });
+});
+
 test("no image exits 3, ignoring older images in the image folder", async () => {
   await withFilm({ gates: ["G1"], mode: "noid,noimage" }, async (c) => {
     const old = join(c.images, "old-session", "exec-old.png");
