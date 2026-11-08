@@ -115,9 +115,9 @@
 ```
 报价 Q<n>
 镜头：S01（4.6 秒 → 计费 6 秒）、S02（……）
-模型：<mini 或 2.5>（<模型 id>，¥<单价>/秒，720p）
+模型：<mini、2.0 或 2.5>（<模型 id>，¥<单价>/秒，720p）
 合计：约 ¥<合计>　已花：¥<已花>　预算余额：¥<余额>
-金额是估算，以账单为准。网关提交时按每镜上限预扣（mini 每镜 15 秒），出片后按实际结算退差额，账户余额要够预扣。
+金额是估算，以账单为准。网关提交时按每镜上限预扣（mini、2.0 每镜 15 秒），出片后按实际结算退差额，账户余额要够预扣。
 <是重拍或重试的话，写明是哪一镜、为什么、改了什么>
 ```
 
@@ -126,7 +126,9 @@
 **选项**（固定写法，`<n>` 和金额照报价填）：
 
 - `批准 Q<n>（¥合计）`，例如 `批准 Q3（¥1.8）`
-- `改用 2.5 重新报价`——只有当本次报价用的是 mini、并且 `config/pricing.json` 里 `models["2.5"].firstLastFrame` 是 `true`（2.5 支持首尾帧）时才出现。现在的配置里它是 `false`，所以这一项不出现，只问 `批准 Q<n>（¥合计）` 和 `先不拍` 两项。检查命令：
+- `改用 2.0 重新报价`——只有当本次报价用的不是 2.0（报价文件里 `model` 不是 `"2.0"`）、并且 `config/pricing.json` 里 `models["2.0"].firstLastFrame` 是 `true`（2.0 支持首尾帧）时才出现。现在的配置里它是 `true`，所以 mini 的报价会出现这一项；2.0 单价是 mini 的 3 倍（¥0.45/秒对 ¥0.15/秒），说明里照新报价的金额写。检查命令：
+  `node -e "const p=JSON.parse(require('fs').readFileSync('config/pricing.json','utf8'));console.log(p.models['2.0'].firstLastFrame===true?'支持':'不支持')"`
+- `改用 2.5 重新报价`——只有当本次报价用的是 mini、并且 `config/pricing.json` 里 `models["2.5"].firstLastFrame` 是 `true`（2.5 支持首尾帧）时才出现。现在的配置里它是 `false`，所以这一项不出现。检查命令：
   `node -e "const p=JSON.parse(require('fs').readFileSync('config/pricing.json','utf8'));console.log(p.models['2.5'].firstLastFrame===true?'支持':'不支持')"`
 - `先不拍`
 
@@ -135,6 +137,7 @@
 - `批准 Q<n>（¥合计）`（或本人在自由文字里明确写了"批准 Q<n>"）→ 在这一轮里运行
   `node scripts/approve.ts <片名> Q<n> --said '<本人回答原文>'`
   （原文用单引号包住；原文里有单引号就写成 `'\''`）。退出 0 → `gates.G4 = "approved"` → 运行 `node scripts/seedance.ts submit <片名> --quote Q<n>`，按 `stages/5-prompts.md` 处理结果。退出 1 → 把原因告诉本人，不提交。
+- `改用 2.0 重新报价` → 运行 `node scripts/quote.ts <片名> --shots <同样的镜头> --model 2.0`，用新报价号重新问 G4。旧报价留着，不批准它。
 - `改用 2.5 重新报价` → 运行 `node scripts/quote.ts <片名> --shots <同样的镜头> --model 2.5`，用新报价号重新问 G4。旧报价留着，不批准它。
 - `先不拍` → `gates.G4 = "rejected"`，不运行 `approve.ts`，问本人想先改什么，等本人说。
 - 回答含糊（"可以""行""先这样"）→ 不算批准，原样再问一次 G4。

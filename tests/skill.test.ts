@@ -340,3 +340,13 @@ test("M5: SKILL.md loads the deferred reveal_path tool with ToolSearch before fi
   assert.ok(sec.includes("`mcp__ccd_host__reveal_path` 是延迟加载的工具，第一次用之前先用 ToolSearch 加载（`select:mcp__ccd_host__reveal_path`）；加载不到或调用失败才退回给可点击路径。"));
   assert.ok(skill.includes("select:mcp__ccd_host__reveal_path"));
 });
+
+test("model 2.0：G4 有「改用 2.0 重新报价」及出现条件；5-prompts 写 --model 2.0；SKILL.md 速查写 mini|2.0|2.5", () => {
+  const g4 = gateSection("G4")!;
+  assert.ok(g4.includes("改用 2.0 重新报价"), "G4 要有 改用 2.0 重新报价");
+  assert.ok(g4.includes(`models["2.0"].firstLastFrame`), "G4 要写明这一项只在 2.0 支持首尾帧时出现");
+  assert.ok(g4.includes("--model 2.0"), "G4 要写明改用 2.0 时的报价命令");
+  const p5 = read(join(SKILL, "references", "stages", "5-prompts.md"));
+  assert.ok(/quote\.ts [^\n`]*--model 2\.0/.test(p5), "5-prompts.md 要写明用 2.0 报价的命令");
+  assert.ok(read(join(SKILL, "SKILL.md")).includes(String.raw`[--model mini\|2.0\|2.5]`), "SKILL.md 速查的 quote 一行要写 mini|2.0|2.5");
+});

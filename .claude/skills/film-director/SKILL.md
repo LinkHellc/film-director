@@ -93,7 +93,7 @@ description: 当本人说"开一支新片""做一支短片""拍个短片：…�
 | `node scripts/review.ts prepare <类型> <片名> [--shot S01]` | 0 打印 prompt.md 绝对路径；2 用法不对、该带或不该带 `--shot`；3 缺资料（输出列出缺的文件模式） |
 | `node scripts/review.ts record <片名> --prompt <prompt.md> --reply <reply.md>` | 0 通过；1 不通过；2 用法不对、文件读不到或这一轮已记录过；3 审核期间资料被改过 |
 | `node scripts/codex-image.ts <片名> --kind style\|sheet\|first\|last --out <基名> --prompt <提示词文件> [--ref <图>]...` | 0 已出图（输出里有"比例不是 16:9"就要裁）；1 阶段闸门不放行（G1/G3/G3b 没批准）；2 参数不对、找不到片子/提示词/参考图；3 Codex 没出图（看最后几行原因）；5 Codex 额度用完 |
-| `node scripts/quote.ts <片名> --shots S01,S02 [--model mini\|2.5]` | 0 报价成功，打印一句话（报价号、秒数、金额、已花、余额）；2 出错（镜头没过提交前审核、没设预算、单镜计费秒数超过模型上限要拆镜头、模型不支持首尾帧等）或超预算（输出以"超预算："开头，报价文件写了但不能批准） |
+| `node scripts/quote.ts <片名> --shots S01,S02 [--model mini\|2.0\|2.5]` | 0 报价成功，打印一句话（报价号、秒数、金额、已花、余额）；2 出错（镜头没过提交前审核、没设预算、单镜计费秒数超过模型上限要拆镜头、模型不支持首尾帧等）或超预算（输出以"超预算："开头，报价文件写了但不能批准） |
 | `node scripts/approve.ts <片名> Q<n> --said '<本人回答原文>'` | 0 已记下批准；1 报价不存在/超预算/原文里没有"批准 Q<n>"/已经批准过；2 用法不对 |
 | `node scripts/seedance.ts submit <片名> --quote Q<n>` | 0 全部提交；1 被闸门拒绝（逐条列原因）、没设 Key、另一个提交的锁还在、网关拒绝、或结果不明（可能已扣费，不要重发）；2 用法不对；4 欠费，其余镜头没提交；7 网关已建任务但没记上账，锁保留 |
 | `node scripts/seedance.ts wait <片名> [--interval 30] [--timeout 3600]` | 0 全部结束并已下载（个别镜头"生成失败"也是 0，看输出）；1 有片段下载出错或没设 Key；2 用法不对；6 超时，已出好的已下载，再 `wait` 一次 |
