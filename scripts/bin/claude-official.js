@@ -108,7 +108,8 @@ function main(args) {
   const cli = findRealClaude(env);
   if (!cli) {
     process.stderr.write("找不到 claude：请装 Claude Code 或设置 FILM_REAL_CLAUDE\n");
-    process.exit(127);
+    process.exitCode = 127;
+    return;
   }
   const child = spawn(process.execPath, [cli, ...args], { stdio: "inherit", env });
   const forward = (sig) => {
@@ -122,7 +123,7 @@ function main(args) {
   process.on("SIGTERM", () => forward("SIGTERM"));
   child.on("error", (err) => {
     process.stderr.write(`启动 claude 失败：${err.message}\n`);
-    process.exit(1);
+    process.exitCode = 1;
   });
   child.on("exit", (code, signal) => {
     process.exit(signal ? 1 : (code ?? 1));

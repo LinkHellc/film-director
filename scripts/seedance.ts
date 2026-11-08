@@ -697,4 +697,4 @@ export async function main(argv: string[]): Promise<number> {
   return usage();
 }
 
-if (import.meta.main) process.exit(await main(process.argv.slice(2)));
+if (import.meta.main) process.exitCode = await main(process.argv.slice(2));
