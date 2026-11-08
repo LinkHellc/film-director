@@ -293,3 +293,50 @@ test("D8: requirements.md lines replace line breaks in the person's words with '
   assert.ok(sec.includes("本人原话里有换行时，换成 ` / `，保持一条一行，原话其他部分不改"));
   assert.ok(skill.includes(" / "));
 });
+
+// ---------- 审查小问题修复（M1–M5） ----------
+
+test("M1: keyframe-plan and pre-submit checklists accept the still tail before 判定标准", () => {
+  const note = "时间轴说明：视频按\"生成秒数\"生成，它可能比片中时长长。提示词【逐秒】和首尾帧计划会写到生成秒数为止：片中用不到的那一段写成\"静止，后期剪掉\"，尾帧对应生成秒数的最后一刻。这样写是对的，不算对不上。";
+  for (const name of ["keyframe-plan.md", "pre-submit.md"]) {
+    const text = read(join(SKILL, "references", "reviews", name));
+    assert.ok(text.includes("静止，后期剪掉"), `${name} 要含"静止，后期剪掉"`);
+    assert.ok(text.includes("不算对不上"), `${name} 要含"不算对不上"`);
+    const i = text.indexOf(note);
+    assert.ok(i >= 0, `${name} 要含时间轴说明原文`);
+    assert.ok(i < text.indexOf("判定标准："), `${name} 时间轴说明要在 判定标准 之前`);
+  }
+  const ps = read(join(SKILL, "references", "reviews", "pre-submit.md"));
+  assert.ok(ps.includes("- 提交前审核额外从严：提示词和首尾帧对不上的任何一处（位置、左右、颜色、人数、道具数量、衣服、表情），以及首尾帧之间机位、大小、背景不一致，都算硬伤。"));
+});
+
+test("M2: shots that generate X seconds and cut the best N seconds write the full action, no still tail", () => {
+  const s = "例外：分镜写明\"生成 X 秒、后期剪出最好的 N 秒\"的镜头，【逐秒】写满生成秒数里的完整动作，不写静止尾巴，后期在 `edl` 里写明剪哪一段。";
+  for (const name of ["4-keyframes.md", "5-prompts.md"]) {
+    const text = read(join(STAGES, name));
+    assert.ok(text.includes("剪出最好的"), `${name} 要含"剪出最好的"`);
+    assert.ok(text.includes(s), `${name} 要含例外原文`);
+  }
+  assert.ok(read(join(SKILL, "references", "seven-part-prompt.md")).includes(s), "seven-part-prompt.md 要含例外原文");
+});
+
+test("M3: 3-style.md step 4 says the last [设定] line for a character wins", () => {
+  const text = read(join(STAGES, "3-style.md"));
+  const part2 = text.slice(text.indexOf("## 第二部分"), text.indexOf("## 产物"));
+  assert.ok(part2.includes("requirements.md 里同一角色有多条 [设定] 时，以时间最后的一条（含\"更正\"）为准。"));
+  assert.ok(text.includes("以时间最后的一条"));
+});
+
+test("M4: 硬性禁止 only forbids > overwriting existing files", () => {
+  const skill = read(join(SKILL, "SKILL.md"));
+  const sec = skill.slice(skill.indexOf("## 硬性禁止"), skill.indexOf("## 阶段索引"));
+  assert.ok(sec.includes("`>` 重定向覆盖已存在的文件"));
+  assert.ok(skill.includes("覆盖已存在的文件"));
+});
+
+test("M5: SKILL.md loads the deferred reveal_path tool with ToolSearch before first use", () => {
+  const skill = read(join(SKILL, "SKILL.md"));
+  const sec = skill.slice(skill.indexOf("## 每一步怎么做"), skill.indexOf("## 审核怎么做"));
+  assert.ok(sec.includes("`mcp__ccd_host__reveal_path` 是延迟加载的工具，第一次用之前先用 ToolSearch 加载（`select:mcp__ccd_host__reveal_path`）；加载不到或调用失败才退回给可点击路径。"));
+  assert.ok(skill.includes("select:mcp__ccd_host__reveal_path"));
+});
