@@ -1,0 +1,18 @@
+Character reference sheet for a short film. Wide 16:9 landscape image, plain soft dark warm-beige studio background (#3a3129), soft warm light from the upper left.
+
+Art style: photorealistic, like real photographs of a real cat taken with a good camera — real fluffy fur, round face, very big round glossy eyes, soft warm lamp-like light. Same cat and same look as the RIGHT (white) cat in the attached reference image. Not a cartoon, not 3D animation, not a painting.
+
+Character: one young pure white cat (the right cat in the reference image).
+Fixed features, keep identical in every view:
+- Fur: pure white #f4f2ee all over, fluffy, with NO markings, spots, or patches anywhere.
+- Eyes: hazel / greenish-grey, very big and round.
+- Nose: small pink nose. Ears: upright, pink inside.
+- No collar, no accessories.
+
+Layout, all the SAME cat, evenly spaced in one row, chest-up portraits:
+1. Front view, mouth closed, serious earnest face.
+2. Right profile (facing frame right), mouth closed.
+3. Front view, chin raised slightly, mouth open as if talking firmly.
+4. Front view, mouth closed, eyes wide, stern little face.
+
+Constraints: only this one cat in each panel, no other animals, no people. No text, labels, letters, or watermarks anywhere. No mirrors and no reflections.
