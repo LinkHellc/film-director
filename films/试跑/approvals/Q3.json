@@ -1,0 +1,15 @@
+{
+  "quote": "Q3",
+  "totalCNY": 2.7,
+  "model": "2.0",
+  "shots": [
+    {
+      "shot": "S01",
+      "seconds": 5,
+      "billable": 6,
+      "reviewHash": "e7d3ea0dfa3e385cc4f0a79f37b05b2afd22d1c26ad028cf1180b9a1449cd5c6"
+    }
+  ],
+  "said": "批准 Q3",
+  "at": "2026-11-08T12:06:29.945Z"
+}
