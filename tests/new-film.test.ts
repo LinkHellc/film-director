@@ -157,3 +157,17 @@ test("中台返回非 200 时退出码非零并说明没有发出事件", async 
     await new Promise<void>((r) => server.close(() => r()));
   }
 });
+
+test("想法里有换行时 requirements.md 第一条换成 ' / '，brief.md 保持原文", async () => {
+  for (const idea of ["第一行\n第二行", "第一行\r\n第二行"]) {
+    await withEnv({}, async (root) => {
+      assert.equal(await main(["测试片", idea, "--no-emit"]), 0);
+      const dir = join(root, "films", "测试片");
+      const req = readFileSync(join(dir, "requirements.md"), "utf8").split(/\r?\n/);
+      const items = req.filter((l) => l.startsWith("- "));
+      assert.deepEqual(items, ["- 第一行 / 第二行"]);
+      assert.ok(!req.includes("第二行"));
+      assert.equal(readFileSync(join(dir, "brief.md"), "utf8"), `${idea}\n`);
+    });
+  }
+});

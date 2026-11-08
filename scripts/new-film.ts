@@ -43,7 +43,7 @@ export async function main(argv: string[]): Promise<number> {
 
   for (const d of SUBDIRS) mkdirSync(join(dir, d));
   writeNew(join(dir, "brief.md"), `${idea}\n`);
-  writeNew(join(dir, "requirements.md"), `# 本人要求\n\n- ${idea}\n`);
+  writeNew(join(dir, "requirements.md"), `# 本人要求\n\n- ${idea.replace(/\r?\n/g, " / ")}\n`);
   const state: FilmState = {
     film,
     stage: "setup",
