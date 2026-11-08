@@ -45,6 +45,21 @@ class SketchTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(image(out).size, (1920, 720))
 
+    def test_single_shot_no_empty_columns(self):
+        # D3：只有 1 个镜头时列数取 min(3, 镜头数)，总表 640×360，没有空灰块
+        out = self.dir / "sheet1.png"
+        write_json(self.board, BOARD[:1])
+        r = run("sketch.py", self.board, out)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(image(out).size, (640, 360))
+
+    def test_two_shots_two_columns(self):
+        out = self.dir / "sheet2.png"
+        write_json(self.board, BOARD[:2])
+        r = run("sketch.py", self.board, out)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(image(out).size, (1280, 360))
+
     def test_refuses_existing_output(self):
         out = self.dir / "sheet.png"
         out.write_bytes(b"keep")

@@ -8,7 +8,8 @@
 x/y/w/h 都是占画面宽/高的比例，(x, y) 是色块左上角；label 可省略，可以是中文。
 
 每镜先按 1920×1080 画：背景色、色块、标签，再在 x=38% 和 x=62% 画黄金分割竖线；
-然后缩到 640×360，镜头号写在左上角，每行 3 张拼成总表（宽固定 1920，空位填深灰）。
+然后缩到 640×360，镜头号写在左上角，每行最多 3 张拼成总表（列数 = min(3, 镜头数)，宽 = 列数 × 640；
+最后一行的空位填深灰）。
 输出已存在则拒绝（退出码 2），原文件不动。
 """
 import json
@@ -121,8 +122,9 @@ def render_shot(shot, font):
 
 
 def build_sheet(shots):
-    rows = math.ceil(len(shots) / COLS)
-    sheet = Image.new("RGB", (TILE_W * COLS, TILE_H * rows), EMPTY_COLOR)
+    cols = min(COLS, len(shots))
+    rows = math.ceil(len(shots) / cols)
+    sheet = Image.new("RGB", (TILE_W * cols, TILE_H * rows), EMPTY_COLOR)
     label_font, tag_font = load_font(64), load_font(28)
     for i, shot in enumerate(shots):
         tile = render_shot(shot, label_font).resize((TILE_W, TILE_H), Image.LANCZOS)
@@ -131,7 +133,7 @@ def build_sheet(shots):
         box = d.textbbox((10, 6), shot["shot"], font=tag_font)
         d.rectangle((box[0] - 6, box[1] - 4, box[2] + 6, box[3] + 4), fill=(0, 0, 0))
         d.text((10, 6), shot["shot"], font=tag_font, fill="white")
-        sheet.paste(tile, ((i % COLS) * TILE_W, (i // COLS) * TILE_H))
+        sheet.paste(tile, ((i % cols) * TILE_W, (i // cols) * TILE_H))
     return sheet
 
 
