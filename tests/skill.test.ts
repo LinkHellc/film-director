@@ -244,3 +244,52 @@ test("misc: 继续做 handles an approved-but-not-submitted quote without re-run
   assert.ok(sec.includes("Q<n> 之前批准过、还没提交，现在提交吗"), "继续做 要先问本人");
   assert.ok(sec.includes("不要再运行 `approve.ts`"), "继续做 要写明不要再运行 approve.ts");
 });
+
+// ---------- 试跑修复（D4–D8） ----------
+
+test("D4: 硬性禁止 forbids in-place edits of artifacts (sed -i, > overwrite, Edit/Write on existing files)", () => {
+  const skill = read(join(SKILL, "SKILL.md"));
+  const sec = skill.slice(skill.indexOf("## 硬性禁止"), skill.indexOf("## 阶段索引"));
+  for (const s of ["sed -i", "`>` 重定向覆盖", "Edit/Write", "另存为新版本", "`state.json`", "`requirements.md`（只追加）"]) {
+    assert.ok(sec.includes(s), `硬性禁止 缺少：${s}`);
+  }
+});
+
+test("D5: keyframe plan and prompts time the whole generated length, not the in-film length", () => {
+  const kf = read(join(STAGES, "4-keyframes.md"));
+  const pr = read(join(STAGES, "5-prompts.md"));
+  const seven = read(join(SKILL, "references", "seven-part-prompt.md"));
+  for (const [name, text] of [["4-keyframes.md", kf], ["5-prompts.md", pr], ["seven-part-prompt.md", seven]] as const) {
+    assert.ok(text.includes("生成秒数"), `${name} 要写 生成秒数`);
+    assert.ok(text.includes("尾帧对应的是**生成秒数**的最后一刻，不是片中时长的最后一刻"), `${name} 要写明尾帧对应生成秒数的最后一刻`);
+    assert.ok(text.includes("静止，后期剪掉"), `${name} 要写明多出来的那段写成"静止，后期剪掉"`);
+    assert.ok(text.includes("\"片中时间\"和\"生成秒数\"两个数都要带上"), `${name} 要写明两个数都要带上`);
+  }
+  assert.ok(seven.includes("【逐秒】的时间轴覆盖整个生成秒数"), "seven-part-prompt.md 要写明【逐秒】覆盖整个生成秒数");
+  assert.ok(pr.includes("【逐秒】的时间轴覆盖整个生成秒数"), "5-prompts.md 要写明【逐秒】覆盖整个生成秒数");
+});
+
+test("D6: 3-style.md step 4 writes fixed features by looking at each sheet with Read", () => {
+  const text = read(join(STAGES, "3-style.md"));
+  const part2 = text.slice(text.indexOf("## 第二部分"), text.indexOf("## 产物"));
+  const step4 = part2.split(/\r?\n/).find((l) => l.startsWith("4. "));
+  assert.ok(step4, "第二部分要有第 4 步");
+  for (const s of ["看图", "Read 打开每张设定图", "毛色或衣服、花纹位置、眼睛颜色、配饰", "不凭印象、不照抄提示词", "再和设定图对一遍"]) {
+    assert.ok(step4.includes(s), `第 4 步缺少：${s}`);
+  }
+});
+
+test("D7: SKILL.md opens every generated image/clip/cut with reveal_path, also before G3/G3b/G2/G5/G6", () => {
+  const skill = read(join(SKILL, "SKILL.md"));
+  const sec = skill.slice(skill.indexOf("## 每一步怎么做"), skill.indexOf("## 审核怎么做"));
+  for (const s of ["mcp__ccd_host__reveal_path", "样帧、设定图、首尾帧、草图", "可点击的路径", "G3、G3b、G2、G5、G6 提问前先打开附带的文件"]) {
+    assert.ok(sec.includes(s), `每一步怎么做 缺少：${s}`);
+  }
+});
+
+test("D8: requirements.md lines replace line breaks in the person's words with ' / '", () => {
+  const skill = read(join(SKILL, "SKILL.md"));
+  const sec = skill.slice(skill.indexOf("## 每一步怎么做"), skill.indexOf("## 审核怎么做"));
+  assert.ok(sec.includes("本人原话里有换行时，换成 ` / `，保持一条一行，原话其他部分不改"));
+  assert.ok(skill.includes(" / "));
+});
