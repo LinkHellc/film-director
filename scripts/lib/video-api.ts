@@ -43,6 +43,18 @@
  *   或 pre_consume_token_quota_failed（Key 自身额度不足）[I]；网关文档另列"402／余额不足"[H]。
  *   → 402、上述 code、或正文含"余额不足/额度不足/quota is not enough/insufficient…quota|balance"都按欠费处理。
  *   403 "This token has no access to model" 等其他 403 不是欠费，按普通拒绝处理（同样停止整批）[H]。
+ * ── seedance-2.0（满血版）核实结果（2026-11-08；只用 curl 读了公开文档页 [G]，并对照价目副本 [A]；没有发任何会建任务或扣费的请求） ──
+ *   - 时长：[G]"当前范围"表原文"seedance-2.0 480p、720p、1080p、4K 4–15 秒"。→ 最短 4 秒（和 mini、2.5 一样，
+ *     billableSeconds 的 4 秒下限不用按模型区分），最长 15 秒（pricing.json maxSeconds 15）。
+ *   - 首尾帧：[G]"首帧、首尾帧和自适应比例"表里 seedance-2.0 的"首帧、首尾帧"一栏有价（720p 0.45），不在
+ *     "seedance-2.5、seedance-1.5-pro 不提供首帧模式"之列；首尾帧的写法（task_mode: "first_last_frame"，content 两张图
+ *     依次 first_frame、last_frame，完整 data URL）是这一节对所有型号通用的一段，和 mini 相同。[A] 同样写着
+ *     "首帧/首尾帧：720p ¥0.45…每秒"。→ firstLastFrame true，请求体只换 model 为 "seedance-2.0"。
+ *   - 单价：[A] billing_expr 720p 标准档 seconds × 0.45；[G] 表"文生、参考素材 720p 0.45""首帧、首尾帧 720p 0.45"，
+ *     并举例"seedance-2.0、720p、输出 5 秒、参考视频 5 秒：0.45 × 5 + 0.45 × 5 = 4.50 元"。→ cnyPerSecond720p 0.45。
+ *     另：[G] 写 9:16 的 720p 首帧 0.15（更便宜）；本流程按 0.45 报价，竖屏时只会高估，不会低估。
+ *   - 预扣：[G]"2.0 系列 15 秒"→ 2.0 每镜提交时预扣 15 × 0.45 = ¥6.75，余额要够。
+ *   - [G] 自述只实测过"Mini 720p、4 秒单图参考生成及安全下载"，2.0 的首尾帧没有经网关实测（本轮也没有实测）。
  * 未核实（按最保守方式实现）：
  *   - 欠费时的确切中文文案（网关 i18n 文本没看到原文）→ 主要靠 HTTP 状态和 code 判断。
  *   - 查询结果里有没有可直接下载的视频网址 → 一律走 /content；若响应里带了网址，只在 /content 失败时

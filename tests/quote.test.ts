@@ -255,3 +255,41 @@ test("I2：spend.jsonl 里的核对行（没有 cny）可以读；坏的核对�
     assert.throws(() => buildQuote(FILM, ["S01"]), /spend\.jsonl 第 1 行/);
   });
 });
+
+test("2.0（seedance-2.0 满血）：两镜各 4.4 秒，每镜计费 5 秒，合计 10 × 0.45 = 4.5", async () => {
+  await withFilm({ budget: 100, shots: { S01: 4.4, S02: 4.4 } }, (dir) => {
+    review(dir, "S01", 1, "pass");
+    review(dir, "S02", 1, "pass");
+    const q = buildQuote(FILM, ["S01", "S02"], "2.0");
+    assert.equal(q.model, "2.0");
+    assert.equal(q.modelId, "seedance-2.0");
+    assert.deepEqual(q.shots.map((s) => s.billable), [5, 5]);
+    assert.equal(q.totalCNY, 4.5);
+    assert.equal(q.overBudget, false);
+  });
+});
+
+test("--model 2.0 写出报价文件，modelId 是 seedance-2.0；单镜上限 15 秒", async () => {
+  await withFilm({ budget: 100, shots: { S01: 4.4, S02: 14.6 } }, async (dir, out) => {
+    review(dir, "S01", 1, "pass");
+    review(dir, "S02", 1, "pass");
+    assert.equal(await main([FILM, "--shots", "S01", "--model", "2.0"]), 0);
+    const q = JSON.parse(readFileSync(join(dir, "quotes", "Q1.json"), "utf8"));
+    assert.equal(q.model, "2.0");
+    assert.equal(q.modelId, "seedance-2.0");
+    assert.equal(q.totalCNY, 2.3);
+    assert.match(out.at(-1)!, /^报价 Q1：1 镜 5 秒 2\.0 约 ¥2\.3/);
+    assert.equal(await main([FILM, "--shots", "S02", "--model", "2.0"]), 2);
+    assert.equal(out.at(-1), "S02 计费 16 秒，超过 seedance-2.0 单镜上限 15 秒，请拆镜头");
+    assert.deepEqual(readdirSync(join(dir, "quotes")), ["Q1.json"]);
+  });
+});
+
+test("--model 只接受 mini、2.0、2.5；用法里写着 mini|2.0|2.5", async () => {
+  await withFilm({ budget: 100, shots: { S01: 4.4 } }, async (dir, out) => {
+    review(dir, "S01", 1, "pass");
+    assert.equal(await main([FILM, "--shots", "S01", "--model", "2"]), 2);
+    assert.match(out.at(-1)!, /--model mini\|2\.0\|2\.5/);
+    assert.deepEqual(readdirSync(join(dir, "quotes")), []);
+  });
+});

@@ -99,7 +99,7 @@ function review(dir: string, shot: string, n: number, verdict: "pass" | "fail"):
 }
 
 /** 报价 + 批准，返回报价号。 */
-async function quoteAndApprove(shots: string, model?: "mini" | "2.5"): Promise<string> {
+async function quoteAndApprove(shots: string, model?: "mini" | "2.0" | "2.5"): Promise<string> {
   const args = [FILM, "--shots", shots, ...(model ? ["--model", model] : [])];
   assert.equal(await quote(args), 0);
   const ids = readdirSync(join(process.env.FILM_ROOT!, "films", FILM, "quotes")).map((n) => Number(/^Q(\d+)/.exec(n)![1]));
@@ -148,6 +148,13 @@ test("闸门 2：模型不支持首尾帧（seedance-2.5）", async () => {
     writeFileSync(qp, JSON.stringify({ ...JSON.parse(readFileSync(qp, "utf8")), model: "2.5", modelId: "seedance-2.5", totalCNY: 5.5 }));
     writeFileSync(ap, JSON.stringify({ ...JSON.parse(readFileSync(ap, "utf8")), totalCNY: 5.5 }));
     assert.deepEqual(checkGates(FILM, id), ["模型 seedance-2.5 不支持首尾帧"]);
+  });
+});
+
+test("2.0（seedance-2.0，firstLastFrame 为 true）：报价批准后 checkGates 返回 []，不报不支持首尾帧", async () => {
+  await withFilm({}, async () => {
+    const id = await quoteAndApprove("S01,S02", "2.0");
+    assert.deepEqual(checkGates(FILM, id), []);
   });
 });
 
@@ -259,6 +266,29 @@ test("submit：闸门通过后逐镜头建任务、记账、改状态；请求�
     assert.ok(Math.abs(st.spentCNY - 1.5) < 1e-9);
     noKey(c);
     for (const f of ["spend.jsonl", "state.json"]) assert.ok(!readFileSync(join(c.dir, f), "utf8").includes(KEY));
+  });
+});
+
+test("submit 2.0：请求体 model 是 seedance-2.0，格式与 mini 相同（首尾帧），按 0.45/秒记账", async () => {
+  await withFilm({}, async (c) => {
+    const id = await quoteAndApprove("S01,S02", "2.0");
+    c.out.length = 0;
+    assert.equal(await main(["submit", FILM, "--quote", id]), 0);
+    const creates = c.gw.creates();
+    assert.equal(creates.length, 2);
+    for (const [i, s] of ["S01", "S02"].entries()) {
+      const b = creates[i].body as any;
+      assert.equal(b.model, "seedance-2.0");
+      assert.equal(b.seconds, 5);
+      assert.equal(b.resolution, "720p");
+      assert.equal(b.task_mode, "first_last_frame");
+      assert.deepEqual(b.content.map((x: any) => x.role), ["first_frame", "last_frame"]);
+      assert.equal(b.content[0].url, "data:image/png;base64," + Buffer.from(PNG(`${s}-first`)).toString("base64"));
+    }
+    const rows = spendLines(c.dir);
+    assert.deepEqual(rows.map((r) => [r.model, r.billable, r.cny]), [["seedance-2.0", 5, 2.25], ["seedance-2.0", 5, 2.25]]);
+    assert.ok(Math.abs(readState(FILM).spentCNY - 4.5) < 1e-9);
+    noKey(c);
   });
 });
 

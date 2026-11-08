@@ -23,7 +23,7 @@ export interface FilmState {
     budgetCNY: number | null;
     music: string | null;
     subtitles: boolean;
-    model: "mini" | "2.5";
+    model: "mini" | "2.0" | "2.5";
   };
   gates: Partial<Record<GateId, GateState>>;
   shots: Record<string, Shot>; // 键形如 "S01"

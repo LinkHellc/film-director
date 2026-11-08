@@ -6,7 +6,7 @@ import { readState } from "./lib/state.ts";
 import { writeNew } from "./lib/versioned.ts";
 import { sha256File } from "./lib/hash.ts";
 
-export type Model = "mini" | "2.5";
+export type Model = "mini" | "2.0" | "2.5";
 
 export interface Quote {
   id: string;
@@ -23,7 +23,7 @@ export interface Quote {
 
 export interface Pricing {
   default: Model;
-  /** maxSeconds：网关单镜最长秒数（mini 15、2.5 30，来源见 scripts/lib/video-api.ts 顶部注释）。 */
+  /** maxSeconds：网关单镜最长秒数（mini 15、2.0 15、2.5 30，来源见 scripts/lib/video-api.ts 顶部注释）。 */
   models: Record<Model, { id: string; cnyPerSecond720p: number; firstLastFrame?: boolean; maxSeconds?: number }>;
 }
 
@@ -46,7 +46,7 @@ export interface SpendRow {
   note?: string;
 }
 
-const USAGE = "用法：quote.ts <片名> --shots S01,S02 [--model mini|2.5]";
+const USAGE = "用法：quote.ts <片名> --shots S01,S02 [--model mini|2.0|2.5]";
 const EPS = 1e-9;
 
 /** 价格表属于代码仓库，按本文件位置定位（与 FILM_ROOT 无关）。 */
@@ -70,7 +70,7 @@ function listNames(dir: string): string[] {
 
 /**
  * 计费秒数：向上取整；余量不足（含等于）0.5 秒再加 1 秒；最少 4 秒。秒数必须是大于 0 的有限数。
- * 4 秒下限：网关文档写明 seedance-2.0-mini 4–15 秒、seedance-2.5 4–30 秒，seconds 是整数，
+ * 4 秒下限：网关文档写明 seedance-2.0-mini 4–15 秒、seedance-2.0 4–15 秒、seedance-2.5 4–30 秒（三者最短都是 4 秒），seconds 是整数，
  * 费用 = 输出秒数 × 单价（来源见 scripts/lib/video-api.ts 顶部注释）。上限因模型而异（pricing.json 的 maxSeconds），buildQuote 检查。
  */
 export function billableSeconds(seconds: number): number {
@@ -244,7 +244,7 @@ export async function main(argv: string[]): Promise<number> {
       return 2;
     }
   }
-  if (!film || !shotsArg || (modelArg !== undefined && modelArg !== "mini" && modelArg !== "2.5")) {
+  if (!film || !shotsArg || (modelArg !== undefined && modelArg !== "mini" && modelArg !== "2.0" && modelArg !== "2.5")) {
     console.error(USAGE);
     return 2;
   }
