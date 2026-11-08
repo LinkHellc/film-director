@@ -47,6 +47,11 @@ const SHOT_FILES = [
   { base: "last", ext: "png", label: "尾帧" },
 ] as const;
 
+/** 金额取整到分：只用于写 spend.jsonl。 */
+function round2(x: number): number {
+  return Math.round(x * 100) / 100;
+}
+
 function fwd(p: string): string {
   return p.replace(/\\/g, "/");
 }
@@ -308,7 +313,8 @@ async function submit(args: string[]): Promise<number> {
     for (const line of q.shots) {
       const shot = line.shot;
       const cny = line.billable * price.cnyPerSecond720p;
-      const base = { quote: quoteId, shot, model: price.id, billable: line.billable, cny, baseUrl: gateway };
+      // 写进 spend.jsonl 的 cny 取整到分（只是存储好看）；本次累计 total 仍用未取整的 cny
+      const base = { quote: quoteId, shot, model: price.id, billable: line.billable, cny: round2(cny), baseUrl: gateway };
 
       // 1) 建任务：这里的失败都还没花钱，或者花没花不确定
       let task: string;

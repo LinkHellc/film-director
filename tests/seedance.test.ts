@@ -334,6 +334,29 @@ test("提交时连接断开（结果不明）：退出 1，按可能已扣费记
   });
 });
 
+/** 把片子里所有镜头的片中时长改成 seconds（5 秒按计费规则算 6 秒）。 */
+function setShotSeconds(dir: string, seconds: number): void {
+  const p = join(dir, "state.json");
+  const st = JSON.parse(readFileSync(p, "utf8"));
+  for (const s of Object.values(st.shots) as any[]) s.seconds = seconds;
+  writeFileSync(p, JSON.stringify(st, null, 2));
+}
+
+test("D2：spend.jsonl 的 cny 写入时取整到分：6 秒 × 0.15 读回来是 0.9（正常行和结果不明行）", async () => {
+  for (const creates of [["ok"], ["crash"]] as VideoServerOptions["creates"][]) {
+    await withFilm({ shots: ["S01"], gw: { creates } }, async (c) => {
+      setShotSeconds(c.dir, 5);
+      const id = await quoteAndApprove("S01");
+      assert.equal(JSON.parse(readFileSync(join(c.dir, "quotes", `${id}.json`), "utf8")).shots[0].billable, 6);
+      await main(["submit", FILM, "--quote", id]);
+      const rows = spendLines(c.dir);
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].cny, 0.9, `${creates}: ${readFileSync(join(c.dir, "spend.jsonl"), "utf8")}`);
+      assert.ok(!readFileSync(join(c.dir, "spend.jsonl"), "utf8").includes("0.8999"));
+    });
+  }
+});
+
 test("没设 SEEDANCE_API_KEY：退出 1，不发请求", async () => {
   await withFilm({}, async (c) => {
     const id = await quoteAndApprove("S01,S02");
