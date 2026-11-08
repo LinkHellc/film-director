@@ -1,0 +1,776 @@
+# Review package: fcea651..HEAD
+
+## Commits
+df3a4b6 feat: Codex 画图与阶段闸门
+
+## Files changed
+ scripts/codex-image.ts       | 220 +++++++++++++++++++++++++++++++++++++++
+ scripts/lib/proc.ts          | 105 +++++++++++++++++++
+ tests/codex-image.test.ts    | 240 +++++++++++++++++++++++++++++++++++++++++++
+ tests/fakes/codex-output.txt |  15 +++
+ tests/fakes/codex.ts         |  60 +++++++++++
+ tests/proc.test.ts           |  85 +++++++++++++++
+ 6 files changed, 725 insertions(+)
+
+## Diff
+diff --git a/scripts/codex-image.ts b/scripts/codex-image.ts
+new file mode 100644
+index 0000000..0321cd4
+--- /dev/null
++++ b/scripts/codex-image.ts
+@@ -0,0 +1,220 @@
++// Codex 画图：一次一张，按阶段闸门放行。
++// 用法：codex-image.ts <片名> --kind style|sheet|first|last --out <相对片子目录的基名> --prompt <提示词文件> [--ref <图>]...
++import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
++import { homedir } from "node:os";
++import { join, relative, resolve } from "node:path";
++import { filmDir } from "./lib/paths.ts";
++import { isApproved, readState } from "./lib/state.ts";
++import { nextVersionPath, writeNew } from "./lib/versioned.ts";
++import { resolveCommand, run } from "./lib/proc.ts";
++
++export type Kind = "style" | "sheet" | "first" | "last";
++const KINDS: Kind[] = ["style", "sheet", "first", "last"];
++
++/** Global Constraints 规定的提示词固定开头。 */
++export const PROMPT_PREFIX = "Use your image generation tool to create exactly ONE image. Do not run shell commands.";
++
++const USAGE =
++  "用法：codex-image.ts <片名> --kind style|sheet|first|last --out <相对片子目录的基名> --prompt <提示词文件> [--ref <图>]...\n" +
++  "  --out：style/sheet 写 style/<名字>（如 style/look）；first/last 写 shots/<镜头>/first 或 shots/<镜头>/last（如 shots/S01/first）。\n" +
++  "  结果存成 <片子目录>/<--out>-v<n>.png，只新建不覆盖。";
++
++const SESSION_RE = /session id:\s*([0-9a-f-]{8,})/i;
++const QUOTA_RE = /quota|rate limit|额度/i;
++const NAME_RE = /^[A-Za-z0-9_\-\u4e00-\u9fa5]{1,40}$/;
++const SHOT_RE = /^S\d{2,3}$/;
++const TIMEOUT_MS = 15 * 60_000;
++
++/**
++ * 解析 --out（相对片子目录、用 / 分隔、不带扩展名和版本号）：
++ * - style、sheet：必须是 style/<名字>
++ * - first、last：必须是 shots/<镜头号>/<first|last>，基名与 --kind 一致
++ * 不合法返回 null。
++ */
++export function parseOut(kind: Kind, out: string): { dir: string; base: string } | null {
++  const parts = out.split("/");
++  if (kind === "style" || kind === "sheet") {
++    if (parts.length !== 2 || parts[0] !== "style" || !NAME_RE.test(parts[1])) return null;
++    return { dir: "style", base: parts[1] };
++  }
++  if (parts.length !== 3 || parts[0] !== "shots" || !SHOT_RE.test(parts[1]) || parts[2] !== kind) return null;
++  return { dir: `shots/${parts[1]}`, base: kind };
++}
++
++/** 从 PNG 文件头（IHDR）读宽高；不是 PNG 返回 null。 */
++export function pngSize(buf: Uint8Array): { width: number; height: number } | null {
++  const sig = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
++  if (buf.length < 24 || sig.some((b, i) => buf[i] !== b)) return null;
++  const b = Buffer.from(buf.buffer, buf.byteOffset, buf.byteLength);
++  if (b.toString("ascii", 12, 16) !== "IHDR") return null;
++  return { width: b.readUInt32BE(16), height: b.readUInt32BE(20) };
++}
++
++/** 加上固定开头；文件里已经有就不重复加。 */
++export function withPrefix(prompt: string): string {
++  return prompt.includes(PROMPT_PREFIX) ? prompt : `${PROMPT_PREFIX}\n${prompt}`;
++}
++
++function imagesRoot(): string {
++  return process.env.FILM_CODEX_IMAGES || join(homedir(), ".codex", "generated_images");
++}
++
++/** dir 里（深入 depth 层子目录）修改时间 >= since 的 .png，取最新的；没有返回 null。 */
++function newestPng(dir: string, since: number, depth: number): string | null {
++  let best: { path: string; mtime: number } | null = null;
++  const walk = (d: string, left: number) => {
++    let entries;
++    try {
++      entries = readdirSync(d, { withFileTypes: true });
++    } catch {
++      return;
++    }
++    for (const e of entries) {
++      const p = join(d, e.name);
++      if (e.isDirectory()) {
++        if (left > 0) walk(p, left - 1);
++      } else if (e.isFile() && /\.png$/i.test(e.name)) {
++        const mtime = statSync(p).mtimeMs;
++        if (mtime >= since && (!best || mtime > best.mtime)) best = { path: p, mtime };
++      }
++    }
++  };
++  walk(dir, depth);
++  return best === null ? null : (best as { path: string }).path;
++}
++
++interface Args {
++  film: string;
++  kind: Kind;
++  out: string;
++  prompt: string;
++  refs: string[];
++}
++
++function parseArgs(argv: string[]): Args | null {
++  const [film, ...rest] = argv;
++  if (!film || film.startsWith("--")) return null;
++  let kind: string | undefined;
++  let out: string | undefined;
++  let prompt: string | undefined;
++  const refs: string[] = [];
++  for (let i = 0; i < rest.length; i++) {
++    const flag = rest[i];
++    const value = rest[i + 1];
++    if (value === undefined || value.startsWith("--")) return null;
++    if (flag === "--kind") kind = value;
++    else if (flag === "--out") out = value;
++    else if (flag === "--prompt") prompt = value;
++    else if (flag === "--ref") refs.push(value);
++    else return null;
++    i++;
++  }
++  if (!kind || !KINDS.includes(kind as Kind) || !out || !prompt) return null;
++  return { film, kind: kind as Kind, out, prompt, refs };
++}
++
++/** 闸门：不放行时返回要输出的话。 */
++function gateRefusal(film: string, kind: Kind): string | null {
++  const state = readState(film);
++  if (!isApproved(state, "G1")) return "故事还没确认，不画图";
++  if (kind !== "style" && !isApproved(state, "G3")) return "画风还没确认，只能画样帧";
++  if ((kind === "first" || kind === "last") && !isApproved(state, "G3b")) return "设定图还没确认";
++  return null;
++}
++
++function fwd(p: string): string {
++  return p.replace(/\\/g, "/");
++}
++
++export async function main(argv: string[]): Promise<number> {
++  const args = parseArgs(argv);
++  if (!args) {
++    console.error(USAGE);
++    return 2;
++  }
++  let dir: string;
++  try {
++    dir = filmDir(args.film);
++  } catch (err) {
++    console.error((err as Error).message);
++    return 2;
++  }
++  if (!existsSync(join(dir, "state.json"))) {
++    console.error(`找不到片子：${args.film}`);
++    return 2;
++  }
++  const target = parseOut(args.kind, args.out);
++  if (!target) {
++    console.error(`--out 和 --kind ${args.kind} 对不上：${args.out}`);
++    console.error(USAGE);
++    return 2;
++  }
++
++  const refusal = gateRefusal(args.film, args.kind);
++  if (refusal) {
++    console.error(refusal);
++    return 1;
++  }
++
++  let prompt: string;
++  try {
++    prompt = readFileSync(resolve(args.prompt), "utf8");
++  } catch {
++    console.error(`读不到提示词文件：${fwd(args.prompt)}`);
++    return 2;
++  }
++  const refs = args.refs.map((r) => resolve(r));
++  for (const [i, r] of refs.entries()) {
++    if (!existsSync(r)) {
++      console.error(`找不到参考图：${fwd(args.refs[i])}`);
++      return 2;
++    }
++  }
++
++  const cmd = [
++    ...resolveCommand("FILM_CODEX_CMD", ["codex"]),
++    "exec", "--skip-git-repo-check", "-s", "read-only",
++    ...refs.flatMap((r) => ["-i", r]),
++    "-",
++  ];
++  // 留 1 秒余量，防文件系统时间精度/时钟取整把本次的图漏掉
++  const started = Date.now() - 1000;
++  const res = await run(cmd, { cwd: dir, stdin: withPrefix(prompt), timeoutMs: TIMEOUT_MS });
++  const output = `${res.stdout}\n${res.stderr}`;
++
++  const session = SESSION_RE.exec(output)?.[1];
++  const root = imagesRoot();
++  const image = session ? newestPng(join(root, session), started, 0) : newestPng(root, started, 1);
++
++  if (!image) {
++    const tail = res.stderr.trim().split(/\r?\n/).slice(-3).join("\n");
++    if (QUOTA_RE.test(output)) {
++      console.error("Codex 额度用完");
++      if (tail) console.error(tail);
++      return 5;
++    }
++    console.error(`Codex 没有出图（退出码 ${res.code}）`);
++    if (tail) console.error(tail);
++    return 3;
++  }
++
++  const data = readFileSync(image);
++  const outDir = join(dir, ...target.dir.split("/"));
++  mkdirSync(outDir, { recursive: true });
++  const dest = nextVersionPath(outDir, target.base, "png");
++  writeNew(dest, data);
++
++  const rel = fwd(relative(dir, dest));
++  const size = pngSize(data);
++  if (!size) {
++    console.log(`已出图：${rel}（读不出宽高，可能不是 PNG）`);
++    return 0;
++  }
++  let line = `已出图：${rel}（${size.width}×${size.height}）`;
++  const ratio = size.width / size.height;
++  if (Math.abs(ratio - 16 / 9) / (16 / 9) > 0.01) line += "；比例不是 16:9，提交视频前要裁切";
++  console.log(line);
++  return 0;
++}
++
++if (import.meta.main) process.exit(await main(process.argv.slice(2)));
+diff --git a/scripts/lib/proc.ts b/scripts/lib/proc.ts
+new file mode 100644
+index 0000000..5b71a8f
+--- /dev/null
++++ b/scripts/lib/proc.ts
+@@ -0,0 +1,105 @@
++import { spawn } from "node:child_process";
++import { statSync } from "node:fs";
++import { delimiter, extname, join, resolve } from "node:path";
++// 与 claude-official.js 共用 npm .cmd 包装的解析（autoloop 同款正则）
++import { cliFromCmd } from "../bin/claude-official.js";
++
++function isFile(p: string): boolean {
++  try {
++    return statSync(p).isFile();
++  } catch {
++    return false;
++  }
++}
++
++/** Windows：在 PATH 里按 PATHEXT 找可执行文件；找不到返回 null。 */
++function whichWin(name: string): string | null {
++  const exts = (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean);
++  for (const dir of (process.env.PATH ?? "").split(delimiter)) {
++    if (!dir) continue;
++    for (const ext of exts) {
++      const p = join(dir.replace(/^"(.*)"$/, "$1"), name + ext.toLowerCase());
++      if (isFile(p)) return resolve(p);
++    }
++  }
++  return null;
++}
++
++/**
++ * Windows 上把命令变成不用 shell 就能 spawn 的形式：
++ * 裸命令名在 PATH 里找；.cmd/.bat（npm 包装）解析出 js 入口，改用当前 node 运行。
++ * 其他平台原样返回。
++ */
++function spawnable(cmd: string[]): string[] {
++  if (process.platform !== "win32") return cmd;
++  let [prog, ...rest] = cmd;
++  if (!/[\\/]/.test(prog) && extname(prog) === "") prog = whichWin(prog) ?? prog;
++  if (/\.(cmd|bat)$/i.test(prog)) {
++    const js = cliFromCmd(prog) as string | null;
++    if (!js || !isFile(js)) throw new Error(`无法不经 shell 运行 ${prog}：认不出里面的 js 入口`);
++    return [process.execPath, js, ...rest];
++  }
++  return [prog, ...rest];
++}
++
++/**
++ * 外部命令：环境变量 <envName> 若有值，必须是非空字符串 JSON 数组（测试用假程序）；否则用 fallback。
++ * 返回可直接 spawn 的 argv（Windows 的 .cmd 包装已解析成 node + js 入口）。
++ */
++export function resolveCommand(envName: string, fallback: string[]): string[] {
++  const raw = process.env[envName];
++  let cmd = fallback;
++  if (raw) {
++    let parsed: unknown;
++    try {
++      parsed = JSON.parse(raw);
++    } catch {
++      parsed = null;
++    }
++    if (!Array.isArray(parsed) || parsed.length === 0 || !parsed.every((x) => typeof x === "string" && x !== "")) {
++      throw new Error(`${envName} 必须是非空字符串组成的 JSON 数组`);
++    }
++    cmd = parsed as string[];
++  }
++  return spawnable(cmd);
++}
++
++/** 运行命令（从不经 shell）。启动失败返回 code 127，超时杀掉并返回 code 124；stderr 里写原因。 */
++export function run(
++  cmd: string[],
++  opts: { cwd?: string; stdin?: string; timeoutMs?: number },
++): Promise<{ code: number; stdout: string; stderr: string }> {
++  return new Promise((done) => {
++    const [prog, ...args] = cmd;
++    const out: Buffer[] = [];
++    const err: Buffer[] = [];
++    let timedOut = false;
++    let settled = false;
++    const finish = (code: number, extra = "") => {
++      if (settled) return;
++      settled = true;
++      if (timer) clearTimeout(timer);
++      done({
++        code,
++        stdout: Buffer.concat(out).toString("utf8"),
++        stderr: Buffer.concat(err).toString("utf8") + extra,
++      });
++    };
++    const child = spawn(prog, args, { cwd: opts.cwd, stdio: ["pipe", "pipe", "pipe"], windowsHide: true, shell: false });
++    const timer = opts.timeoutMs
++      ? setTimeout(() => {
++          timedOut = true;
++          child.kill();
++        }, opts.timeoutMs)
++      : null;
++    child.stdout.on("data", (d: Buffer) => out.push(d));
++    child.stderr.on("data", (d: Buffer) => err.push(d));
++    child.on("error", (e) => finish(127, `\n启动失败：${prog}：${e.message}`));
++    child.on("close", (code) => {
++      if (timedOut) finish(124, `\n超时（${opts.timeoutMs}ms）被终止`);
++      else finish(code ?? 1);
++    });
++    child.stdin.on("error", () => {}); // 子进程不读 stdin 就退出时会 EPIPE，忽略
++    child.stdin.end(opts.stdin ?? "");
++  });
++}
+diff --git a/tests/codex-image.test.ts b/tests/codex-image.test.ts
+new file mode 100644
+index 0000000..2a99205
+--- /dev/null
++++ b/tests/codex-image.test.ts
+@@ -0,0 +1,240 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { dirname, join, resolve } from "node:path";
++import { fileURLToPath } from "node:url";
++import { main, PROMPT_PREFIX, pngSize, parseOut } from "../scripts/codex-image.ts";
++import type { FilmState, GateId } from "../scripts/lib/state.ts";
++
++const FILM = "画图片";
++const FAKE = resolve(dirname(fileURLToPath(import.meta.url)), "fakes", "codex.ts");
++
++interface Ctx {
++  root: string;
++  dir: string;
++  images: string;
++  log: string;
++  out: string[];
++  calls: () => { argv: string[]; stdin: string }[];
++}
++
++const ENV_KEYS = ["FILM_ROOT", "FILM_CODEX_CMD", "FILM_CODEX_IMAGES", "FAKE_CODEX_LOG", "FAKE_CODEX_MODE", "FAKE_CODEX_SIZE"];
++
++async function withFilm(
++  opts: { gates: GateId[]; mode?: string; size?: string },
++  fn: (c: Ctx) => Promise<void>,
++): Promise<void> {
++  const root = mkdtempSync(join(tmpdir(), "film-codex-"));
++  const saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
++  const out: string[] = [];
++  const log = console.log;
++  const err = console.error;
++  console.log = (...a: unknown[]) => void out.push(a.join(" "));
++  console.error = (...a: unknown[]) => void out.push(a.join(" "));
++  try {
++    const dir = join(root, "films", FILM);
++    const images = join(root, "codex-images");
++    const logPath = join(root, "codex-log.jsonl");
++    mkdirSync(dir, { recursive: true });
++    mkdirSync(images, { recursive: true });
++    const state: FilmState = {
++      film: FILM,
++      stage: "style",
++      settings: { seconds: 10, aspect: "16:9", budgetCNY: 100, music: null, subtitles: false, model: "mini" },
++      gates: Object.fromEntries(opts.gates.map((g) => [g, "approved"])),
++      shots: {},
++      spentCNY: 0,
++    };
++    writeFileSync(join(dir, "state.json"), JSON.stringify(state, null, 2));
++    writeFileSync(join(root, "prompt.txt"), "雨夜的小镇邮局，暖黄灯光，电影感。");
++    process.env.FILM_ROOT = root;
++    process.env.FILM_CODEX_CMD = JSON.stringify([process.execPath, FAKE]);
++    process.env.FILM_CODEX_IMAGES = images;
++    process.env.FAKE_CODEX_LOG = logPath;
++    if (opts.mode) process.env.FAKE_CODEX_MODE = opts.mode;
++    else delete process.env.FAKE_CODEX_MODE;
++    if (opts.size) process.env.FAKE_CODEX_SIZE = opts.size;
++    else delete process.env.FAKE_CODEX_SIZE;
++    const calls = () =>
++      existsSync(logPath)
++        ? readFileSync(logPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l))
++        : [];
++    await fn({ root, dir, images, log: logPath, out, calls });
++  } finally {
++    console.log = log;
++    console.error = err;
++    for (const [k, v] of Object.entries(saved)) {
++      if (v === undefined) delete process.env[k];
++      else process.env[k] = v;
++    }
++    rmSync(root, { recursive: true, force: true });
++  }
++}
++
++function args(c: Ctx, kind: string, out: string, extra: string[] = []): string[] {
++  return [FILM, "--kind", kind, "--out", out, "--prompt", join(c.root, "prompt.txt"), ...extra];
++}
++
++const text = (c: Ctx) => c.out.join("\n");
++
++test("G1 not approved: refuses every kind without calling codex", async () => {
++  for (const [kind, out] of [["style", "style/look"], ["sheet", "style/hero"], ["first", "shots/S01/first"], ["last", "shots/S01/last"]]) {
++    await withFilm({ gates: [] }, async (c) => {
++      assert.equal(await main(args(c, kind, out)), 1);
++      assert.match(text(c), /故事还没确认，不画图/);
++      assert.equal(c.calls().length, 0);
++      assert.equal(existsSync(c.log), false);
++    });
++  }
++});
++
++test("G3 not approved: only style frames allowed", async () => {
++  for (const [kind, out] of [["sheet", "style/hero"], ["first", "shots/S01/first"], ["last", "shots/S01/last"]]) {
++    await withFilm({ gates: ["G1"] }, async (c) => {
++      assert.equal(await main(args(c, kind, out)), 1);
++      assert.match(text(c), /画风还没确认，只能画样帧/);
++      assert.equal(c.calls().length, 0);
++    });
++  }
++});
++
++test("G3b not approved: no first/last keyframes", async () => {
++  for (const [kind, out] of [["first", "shots/S01/first"], ["last", "shots/S01/last"]]) {
++    await withFilm({ gates: ["G1", "G3"] }, async (c) => {
++      assert.equal(await main(args(c, kind, out)), 1);
++      assert.match(text(c), /设定图还没确认/);
++      assert.equal(c.calls().length, 0);
++    });
++  }
++  // G3 批准、G3b 未批准时设定图仍可以画
++  await withFilm({ gates: ["G1", "G3"] }, async (c) => {
++    assert.equal(await main(args(c, "sheet", "style/hero")), 0);
++    assert.ok(existsSync(join(c.dir, "style", "hero-v1.png")));
++  });
++});
++
++test("style frame: copies to style/look-v1.png, then -v2; prints path and size", async () => {
++  await withFilm({ gates: ["G1"] }, async (c) => {
++    assert.equal(await main(args(c, "style", "style/look")), 0);
++    assert.ok(existsSync(join(c.dir, "style", "look-v1.png")));
++    assert.match(text(c), /style\/look-v1\.png/);
++    assert.match(text(c), /1920×1080/);
++    assert.doesNotMatch(text(c), /比例不是 16:9/);
++    assert.equal(await main(args(c, "style", "style/look")), 0);
++    assert.ok(existsSync(join(c.dir, "style", "look-v2.png")));
++    assert.deepEqual(pngSize(readFileSync(join(c.dir, "style", "look-v2.png"))), { width: 1920, height: 1080 });
++    assert.deepEqual(readdirSync(join(c.dir, "style")).sort(), ["look-v1.png", "look-v2.png"]);
++  });
++});
++
++test("command line: exec flags, refs in order with -i, prompt on stdin with fixed prefix once", async () => {
++  await withFilm({ gates: ["G1", "G3", "G3b"] }, async (c) => {
++    const a = join(c.dir, "style", "look-v1.png");
++    const b = join(c.dir, "style", "hero-v1.png");
++    mkdirSync(dirname(a), { recursive: true });
++    writeFileSync(a, "x");
++    writeFileSync(b, "y");
++    assert.equal(await main(args(c, "first", "shots/S01/first", ["--ref", a, "--ref", b])), 0);
++    const [call] = c.calls();
++    assert.deepEqual(call.argv, ["exec", "--skip-git-repo-check", "-s", "read-only", "-i", a, "-i", b, "-"]);
++    assert.ok(call.stdin.startsWith(PROMPT_PREFIX));
++    assert.match(call.stdin, /雨夜的小镇邮局/);
++    assert.ok(existsSync(join(c.dir, "shots", "S01", "first-v1.png")));
++
++    // 文件里已经有固定开头就不重复加
++    writeFileSync(join(c.root, "prompt.txt"), `${PROMPT_PREFIX}\n尾帧：邮差推门而出。`);
++    assert.equal(await main(args(c, "last", "shots/S01/last")), 0);
++    const second = c.calls()[1];
++    assert.equal(second.stdin.split(PROMPT_PREFIX).length - 1, 1);
++    assert.ok(existsSync(join(c.dir, "shots", "S01", "last-v1.png")));
++  });
++});
++
++test("missing ref is an error and codex is not called", async () => {
++  await withFilm({ gates: ["G1"] }, async (c) => {
++    assert.equal(await main(args(c, "style", "style/look", ["--ref", join(c.root, "nope.png")])), 2);
++    assert.equal(c.calls().length, 0);
++  });
++});
++
++test("quota error exits 5", async () => {
++  await withFilm({ gates: ["G1"], mode: "quota" }, async (c) => {
++    assert.equal(await main(args(c, "style", "style/look")), 5);
++    assert.match(text(c), /Codex 额度用完/);
++    assert.equal(existsSync(join(c.dir, "style")), false);
++  });
++});
++
++test("no image exits 3, ignoring older images in the image folder", async () => {
++  await withFilm({ gates: ["G1"], mode: "noid,noimage" }, async (c) => {
++    const old = join(c.images, "old-session", "exec-old.png");
++    mkdirSync(dirname(old), { recursive: true });
++    writeFileSync(old, readFileSync(FAKE)); // 内容无所谓
++    const past = new Date(Date.now() - 3600_000);
++    utimesSync(old, past, past);
++    assert.equal(await main(args(c, "style", "style/look")), 3);
++    assert.match(text(c), /Codex 没有出图/);
++    assert.equal(existsSync(join(c.dir, "style")), false);
++  });
++});
++
++test("no session id: falls back to newest image modified after start", async () => {
++  await withFilm({ gates: ["G1"], mode: "noid", size: "1280x720" }, async (c) => {
++    assert.equal(await main(args(c, "style", "style/look")), 0);
++    assert.deepEqual(pngSize(readFileSync(join(c.dir, "style", "look-v1.png"))), { width: 1280, height: 720 });
++  });
++});
++
++test("1024x1024 image warns about 16:9", async () => {
++  await withFilm({ gates: ["G1"], size: "1024x1024" }, async (c) => {
++    assert.equal(await main(args(c, "style", "style/look")), 0);
++    assert.match(text(c), /1024×1024/);
++    assert.match(text(c), /比例不是 16:9，提交视频前要裁切/);
++  });
++});
++
++test("parseOut: --out is <subfolder>/<base> relative to the film dir and must match --kind", () => {
++  assert.deepEqual(parseOut("style", "style/look"), { dir: "style", base: "look" });
++  assert.deepEqual(parseOut("sheet", "style/主角"), { dir: "style", base: "主角" });
++  assert.deepEqual(parseOut("first", "shots/S01/first"), { dir: "shots/S01", base: "first" });
++  assert.deepEqual(parseOut("last", "shots/S12/last"), { dir: "shots/S12", base: "last" });
++  for (const [kind, out] of [
++    ["style", "look"], // 缺子目录
++    ["style", "shots/S01/first"], // 子目录不对
++    ["sheet", "style/a/b"],
++    ["first", "style/look"],
++    ["first", "shots/S01/last"], // 首帧的基名必须是 first
++    ["last", "shots/S01/first"],
++    ["first", "shots/../first"],
++    ["first", "shots/S01"],
++    ["style", "style/../look"],
++    ["style", "style\\look"],
++    ["style", "/style/look"],
++    ["style", "style/look.png"],
++    ["style", "style/"],
++  ]) {
++    assert.equal(parseOut(kind as "style", out), null, `${kind} ${out}`);
++  }
++});
++
++test("bad arguments exit 2 without calling codex", async () => {
++  await withFilm({ gates: ["G1", "G3", "G3b"] }, async (c) => {
++    assert.equal(await main(args(c, "first", "style/look")), 2);
++    assert.equal(await main(args(c, "poster", "style/look")), 2);
++    assert.equal(await main([FILM, "--kind", "style", "--out", "style/look"]), 2);
++    assert.equal(await main(args(c, "style", "style/look", ["--prompt"])), 2);
++    assert.equal(c.calls().length, 0);
++  });
++});
++
++test("pngSize reads IHDR and rejects non-PNG", () => {
++  const buf = Buffer.alloc(33);
++  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(buf, 0);
++  buf.writeUInt32BE(13, 8);
++  buf.write("IHDR", 12, "ascii");
++  buf.writeUInt32BE(640, 16);
++  buf.writeUInt32BE(360, 20);
++  assert.deepEqual(pngSize(buf), { width: 640, height: 360 });
++  assert.equal(pngSize(Buffer.from("GIF89a-----------------------------")), null);
++});
+diff --git a/tests/fakes/codex-output.txt b/tests/fakes/codex-output.txt
+new file mode 100644
+index 0000000..51f1aad
+--- /dev/null
++++ b/tests/fakes/codex-output.txt
+@@ -0,0 +1,15 @@
++OpenAI Codex v0.77.0 (research preview)
++--------
++workdir: C:\Users\<user>\film\films\<片名>
++model: <model>
++provider: openai
++approval: never
++sandbox: read-only
++reasoning effort: medium
++reasoning summaries: auto
++session id: {{SESSION_ID}}
++--------
++user
++{{PROMPT}}
++
++mcp startup: ready: node_repl, memory
+diff --git a/tests/fakes/codex.ts b/tests/fakes/codex.ts
+new file mode 100644
+index 0000000..ba958b3
+--- /dev/null
++++ b/tests/fakes/codex.ts
+@@ -0,0 +1,60 @@
++// 假的 codex：模仿 codex-cli 0.77 `exec` 的行为。
++// - 每次调用往 FAKE_CODEX_LOG 追加一行 JSON：{ argv, stdin }。
++// - 把 codex-output.txt（真实开头，已脱敏）填上 session id 和提示词后写到 stderr（真 codex 的开头也在 stderr）。
++// - 出图：<FILM_CODEX_IMAGES>/<session id>/exec-<uuid>.png，尺寸 FAKE_CODEX_SIZE（默认 1920x1080）。
++// FAKE_CODEX_MODE（可逗号组合）：ok（默认）| quota（报额度错、不出图、退出 1）| noimage（不出图、退出 0）| noid（不打印 session id，图放在 <出图目录>/other/）。
++import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
++import { randomUUID } from "node:crypto";
++import { dirname, join } from "node:path";
++import { fileURLToPath } from "node:url";
++
++function readStdin(): string {
++  try {
++    return readFileSync(0, "utf8");
++  } catch {
++    return "";
++  }
++}
++
++/** 只有 PNG 签名 + IHDR + IEND 的最小 PNG（CRC 填 0，读宽高够用）。 */
++function png(width: number, height: number): Uint8Array {
++  const buf = Buffer.alloc(8 + 25 + 12);
++  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(buf, 0);
++  buf.writeUInt32BE(13, 8);
++  buf.write("IHDR", 12, "ascii");
++  buf.writeUInt32BE(width, 16);
++  buf.writeUInt32BE(height, 20);
++  buf.writeUInt8(8, 24); // bit depth
++  buf.writeUInt8(2, 25); // color type RGB
++  // IHDR 的 CRC 在 29..32（全 0）；IEND：长度 0 在 33，类型在 37，CRC 在 41（全 0）
++  buf.write("IEND", 37, "ascii");
++  return buf;
++}
++
++const argv = process.argv.slice(2);
++const stdin = readStdin();
++if (process.env.FAKE_CODEX_LOG) appendFileSync(process.env.FAKE_CODEX_LOG, JSON.stringify({ argv, stdin }) + "\n", "utf8");
++
++const modes = new Set((process.env.FAKE_CODEX_MODE ?? "ok").split(","));
++const session = modes.has("noid") ? null : randomUUID();
++const fixture = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "codex-output.txt"), "utf8");
++let banner = fixture.replace("{{PROMPT}}", stdin.trimEnd());
++banner = session ? banner.replace("{{SESSION_ID}}", session) : banner.replace(/^session id:.*\r?\n/m, "");
++process.stderr.write(banner);
++
++if (modes.has("quota")) {
++  process.stderr.write("ERROR: You've hit your usage limit (rate limit / quota exceeded). Try again later.\n");
++  process.exit(1);
++}
++if (modes.has("noimage")) {
++  process.stdout.write("I could not generate an image.\n");
++  process.exit(0);
++}
++
++const [w, h] = (process.env.FAKE_CODEX_SIZE ?? "1920x1080").split("x").map(Number);
++const root = process.env.FILM_CODEX_IMAGES!;
++const dir = join(root, session ?? "other");
++mkdirSync(dir, { recursive: true });
++writeFileSync(join(dir, `exec-${randomUUID()}.png`), png(w, h));
++process.stdout.write("Generated one image.\n");
++process.exit(0);
+diff --git a/tests/proc.test.ts b/tests/proc.test.ts
+new file mode 100644
+index 0000000..bb6a5eb
+--- /dev/null
++++ b/tests/proc.test.ts
+@@ -0,0 +1,85 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { resolveCommand, run } from "../scripts/lib/proc.ts";
++
++function withTmp(fn: (dir: string) => Promise<void> | void): Promise<void> {
++  const dir = mkdtempSync(join(tmpdir(), "film-proc-"));
++  return Promise.resolve(fn(dir)).finally(() => rmSync(dir, { recursive: true, force: true }));
++}
++
++function withEnv(vars: Record<string, string | undefined>, fn: () => void): void {
++  const saved = Object.fromEntries(Object.keys(vars).map((k) => [k, process.env[k]]));
++  try {
++    for (const [k, v] of Object.entries(vars)) {
++      if (v === undefined) delete process.env[k];
++      else process.env[k] = v;
++    }
++    fn();
++  } finally {
++    for (const [k, v] of Object.entries(saved)) {
++      if (v === undefined) delete process.env[k];
++      else process.env[k] = v;
++    }
++  }
++}
++
++test("resolveCommand: env JSON array wins over fallback", () => {
++  withEnv({ FILM_TEST_CMD: JSON.stringify([process.execPath, "x.js", "--flag"]) }, () => {
++    assert.deepEqual(resolveCommand("FILM_TEST_CMD", ["nope"]), [process.execPath, "x.js", "--flag"]);
++  });
++});
++
++test("resolveCommand: bad env value throws", () => {
++  for (const bad of ["codex", "[]", "[1]", '{"a":1}']) {
++    withEnv({ FILM_TEST_CMD: bad }, () => {
++      assert.throws(() => resolveCommand("FILM_TEST_CMD", ["x"]), /FILM_TEST_CMD/);
++    });
++  }
++});
++
++test("resolveCommand: npm .cmd shim on PATH resolves to node + js entry", { skip: process.platform !== "win32" }, async () => {
++  await withTmp((dir) => {
++    mkdirSync(join(dir, "node_modules", "fake", "bin"), { recursive: true });
++    const js = join(dir, "node_modules", "fake", "bin", "fake.js");
++    writeFileSync(js, "");
++    writeFileSync(
++      join(dir, "fakecli.cmd"),
++      '@ECHO off\r\nSETLOCAL\r\nCALL :find_dp0\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\node_modules\\fake\\bin\\fake.js" %*\r\n',
++    );
++    withEnv({ FILM_TEST_CMD: undefined, PATH: `${dir};${process.env.PATH}` }, () => {
++      assert.deepEqual(resolveCommand("FILM_TEST_CMD", ["fakecli", "--x"]), [process.execPath, js, "--x"]);
++    });
++  });
++});
++
++test("run: passes stdin, captures stdout/stderr and exit code, no shell interpretation", async () => {
++  const script = [
++    "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{",
++    "process.stdout.write(JSON.stringify({argv:process.argv.slice(1),stdin:s}));",
++    "process.stderr.write('err');process.exit(3);});",
++  ].join("");
++  const tricky = ['a & echo pwned', '"quoted"', "%PATH%", "^|<>", "中文 参数"];
++  const r = await run([process.execPath, "-e", script, ...tricky], { stdin: "提示词 & stuff\n" });
++  assert.equal(r.code, 3);
++  assert.equal(r.stderr, "err");
++  const got = JSON.parse(r.stdout);
++  assert.deepEqual(got.argv, tricky);
++  assert.equal(got.stdin, "提示词 & stuff\n");
++});
++
++test("run: missing program returns non-zero instead of throwing", async () => {
++  const r = await run(["definitely-not-a-program-xyz"], {});
++  assert.notEqual(r.code, 0);
++  assert.match(r.stderr, /definitely-not-a-program-xyz/);
++});
++
++test("run: timeout kills the child", async () => {
++  const t = Date.now();
++  const r = await run([process.execPath, "-e", "setTimeout(()=>{},60000)"], { timeoutMs: 300 });
++  assert.notEqual(r.code, 0);
++  assert.match(r.stderr, /超时/);
++  assert.ok(Date.now() - t < 10_000);
++});

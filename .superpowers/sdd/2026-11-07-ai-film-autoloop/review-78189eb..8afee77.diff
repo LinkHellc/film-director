@@ -1,0 +1,358 @@
+# Review package: 78189eb..HEAD
+
+## Commits
+8afee77 feat: 报价
+
+## Files changed
+ scripts/quote.ts    | 182 ++++++++++++++++++++++++++++++++++++++++++++++++++++
+ tests/quote.test.ts | 153 +++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 335 insertions(+)
+
+## Diff
+diff --git a/scripts/quote.ts b/scripts/quote.ts
+new file mode 100644
+index 0000000..a01fff6
+--- /dev/null
++++ b/scripts/quote.ts
+@@ -0,0 +1,182 @@
++import { readFileSync, readdirSync } from "node:fs";
++import { dirname, join, resolve } from "node:path";
++import { fileURLToPath } from "node:url";
++import { filmDir } from "./lib/paths.ts";
++import { readState } from "./lib/state.ts";
++import { writeNew } from "./lib/versioned.ts";
++import { sha256File } from "./lib/hash.ts";
++
++type Model = "mini" | "2.5";
++
++export interface Quote {
++  id: string;
++  film: string;
++  model: Model;
++  modelId: string;
++  shots: { shot: string; seconds: number; billable: number; reviewHash: string }[];
++  totalCNY: number;
++  spentCNY: number;
++  budgetCNY: number;
++  overBudget: boolean;
++  createdAt: string;
++}
++
++interface Pricing {
++  default: Model;
++  models: Record<Model, { id: string; cnyPerSecond720p: number }>;
++}
++
++const USAGE = "用法：quote.ts <片名> --shots S01,S02 [--model mini|2.5]";
++const EPS = 1e-9;
++
++/** 价格表属于代码仓库，按本文件位置定位（与 FILM_ROOT 无关）。 */
++function readPricing(): Pricing {
++  const path = resolve(dirname(fileURLToPath(import.meta.url)), "..", "config", "pricing.json");
++  return JSON.parse(readFileSync(path, "utf8")) as Pricing;
++}
++
++function round1(x: number): number {
++  return Math.round(x * 10) / 10;
++}
++
++function listNames(dir: string): string[] {
++  try {
++    return readdirSync(dir);
++  } catch (err) {
++    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
++    throw err;
++  }
++}
++
++/** 计费秒数：向上取整；余量不足（含等于）0.5 秒再加 1 秒；最少 2 秒。 */
++export function billableSeconds(seconds: number): number {
++  let n = Math.ceil(seconds - EPS);
++  if (n - seconds <= 0.5 + EPS) n += 1;
++  return Math.max(n, 2);
++}
++
++/** 镜头最新（n 最大）的 pre-submit 审核文件；必须 verdict 为 pass，返回其哈希。 */
++function passedReviewHash(dir: string, shot: string): string {
++  const esc = shot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
++  const re = new RegExp(`^pre-submit-${esc}-v(\\d+)\\.json$`);
++  let best = 0;
++  for (const name of listNames(join(dir, "reviews"))) {
++    const m = re.exec(name);
++    if (m) best = Math.max(best, Number(m[1]));
++  }
++  const fail = new Error(`${shot} 还没有通过提交前审核`);
++  if (best === 0) throw fail;
++  const path = join(dir, "reviews", `pre-submit-${shot}-v${best}.json`);
++  const review = JSON.parse(readFileSync(path, "utf8")) as { verdict?: string };
++  if (review.verdict !== "pass") throw fail;
++  return sha256File(path);
++}
++
++/** spend.jsonl 各行 cny 之和；文件不存在为 0。 */
++function spentFromLog(dir: string): number {
++  let raw: string;
++  try {
++    raw = readFileSync(join(dir, "spend.jsonl"), "utf8");
++  } catch (err) {
++    if ((err as NodeJS.ErrnoException).code === "ENOENT") return 0;
++    throw err;
++  }
++  let sum = 0;
++  for (const line of raw.split(/\r?\n/)) {
++    if (!line.trim()) continue;
++    sum += Number((JSON.parse(line) as { cny: number }).cny);
++  }
++  return round1(sum);
++}
++
++function nextQuoteId(dir: string): string {
++  let max = 0;
++  for (const name of listNames(join(dir, "quotes"))) {
++    const m = /^Q(\d+)\.json$/.exec(name);
++    if (m) max = Math.max(max, Number(m[1]));
++  }
++  return `Q${max + 1}`;
++}
++
++export function buildQuote(film: string, shots: string[], model?: Model): Quote {
++  const dir = filmDir(film);
++  const state = readState(film);
++  const pricing = readPricing();
++  const m: Model = model ?? state.settings.model ?? pricing.default;
++  const price = pricing.models[m];
++  if (!price) throw new Error(`没有这个模型：${m}`);
++  if (shots.length === 0) throw new Error("没有指定镜头");
++  const seen = new Set<string>();
++  for (const s of shots) {
++    if (seen.has(s)) throw new Error(`镜头重复：${s}`);
++    seen.add(s);
++    if (!Object.hasOwn(state.shots, s)) throw new Error(`没有这个镜头：${s}`);
++  }
++  const budget = state.settings.budgetCNY;
++  if (budget === null || budget === undefined) throw new Error("还没有设总预算");
++
++  const lines = shots.map((shot) => {
++    const seconds = state.shots[shot].seconds;
++    return { shot, seconds, billable: billableSeconds(seconds), reviewHash: passedReviewHash(dir, shot) };
++  });
++  const totalCNY = round1(lines.reduce((a, l) => a + l.billable, 0) * price.cnyPerSecond720p);
++  const spentCNY = spentFromLog(dir);
++  return {
++    id: nextQuoteId(dir),
++    film,
++    model: m,
++    modelId: price.id,
++    shots: lines,
++    totalCNY,
++    spentCNY,
++    budgetCNY: budget,
++    overBudget: spentCNY + totalCNY > budget + EPS,
++    createdAt: new Date().toISOString(),
++  };
++}
++
++function human(p: string): string {
++  return p.replace(/\\/g, "/");
++}
++
++export async function main(argv: string[]): Promise<number> {
++  const [film, ...rest] = argv;
++  let shotsArg: string | undefined;
++  let modelArg: string | undefined;
++  for (let i = 0; i < rest.length; i++) {
++    if (rest[i] === "--shots") shotsArg = rest[++i];
++    else if (rest[i] === "--model") modelArg = rest[++i];
++    else {
++      console.error(USAGE);
++      return 2;
++    }
++  }
++  if (!film || !shotsArg || (modelArg !== undefined && modelArg !== "mini" && modelArg !== "2.5")) {
++    console.error(USAGE);
++    return 2;
++  }
++  const shots = shotsArg.split(",").map((s) => s.trim()).filter(Boolean);
++
++  let q: Quote;
++  try {
++    q = buildQuote(film, shots, modelArg as Model | undefined);
++  } catch (err) {
++    console.error((err as Error).message);
++    return 2;
++  }
++  const path = join(filmDir(film), "quotes", `${q.id}.json`);
++  writeNew(path, JSON.stringify(q, null, 2) + "\n");
++
++  const secs = q.shots.reduce((a, s) => a + s.billable, 0);
++  const sentence =
++    `报价 ${q.id}：${q.shots.length} 镜 ${secs} 秒 ${q.model} 约 ¥${q.totalCNY.toFixed(1)}（估算，以账单为准）；` +
++    `已花 ¥${q.spentCNY.toFixed(1)}，预算余 ¥${round1(q.budgetCNY - q.spentCNY).toFixed(1)}`;
++  if (q.overBudget) {
++    console.error(`超预算：${sentence}（已写 ${human(path)}，不能提交）`);
++    return 2;
++  }
++  console.log(sentence);
++  return 0;
++}
++
++if (import.meta.main) process.exit(await main(process.argv.slice(2)));
+diff --git a/tests/quote.test.ts b/tests/quote.test.ts
+new file mode 100644
+index 0000000..d571615
+--- /dev/null
++++ b/tests/quote.test.ts
+@@ -0,0 +1,153 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { billableSeconds, buildQuote, main } from "../scripts/quote.ts";
++import { sha256File } from "../scripts/lib/hash.ts";
++import type { FilmState } from "../scripts/lib/state.ts";
++
++const FILM = "测试片";
++
++/** 临时 FILM_ROOT（含一部片子）+ 环境变量恢复 + 捕获 console 输出。 */
++async function withFilm(
++  opts: { budget: number | null; shots: Record<string, number>; spent?: number[] },
++  fn: (dir: string, out: string[]) => Promise<void> | void,
++): Promise<void> {
++  const root = mkdtempSync(join(tmpdir(), "film-quote-"));
++  const saved = process.env.FILM_ROOT;
++  const out: string[] = [];
++  const log = console.log;
++  const err = console.error;
++  console.log = (...a: unknown[]) => void out.push(a.join(" "));
++  console.error = (...a: unknown[]) => void out.push(a.join(" "));
++  try {
++    process.env.FILM_ROOT = root;
++    const dir = join(root, "films", FILM);
++    for (const d of ["reviews", "quotes"]) mkdirSync(join(dir, d), { recursive: true });
++    const state: FilmState = {
++      film: FILM,
++      stage: "generate",
++      settings: { seconds: 10, aspect: "16:9", budgetCNY: opts.budget, music: null, subtitles: false, model: "mini" },
++      gates: {},
++      shots: Object.fromEntries(
++        Object.entries(opts.shots).map(([k, s]) => [k, { seconds: s, status: "ready", clip: null }]),
++      ),
++      spentCNY: 0,
++    };
++    writeFileSync(join(dir, "state.json"), JSON.stringify(state, null, 2));
++    if (opts.spent) {
++      writeFileSync(
++        join(dir, "spend.jsonl"),
++        opts.spent.map((cny, i) => JSON.stringify({ shot: `X${i}`, cny })).join("\n") + "\n",
++      );
++    }
++    await fn(dir, out);
++  } finally {
++    console.log = log;
++    console.error = err;
++    if (saved === undefined) delete process.env.FILM_ROOT;
++    else process.env.FILM_ROOT = saved;
++    rmSync(root, { recursive: true, force: true });
++  }
++}
++
++function review(dir: string, shot: string, n: number, verdict: "pass" | "fail"): string {
++  const path = join(dir, "reviews", `pre-submit-${shot}-v${n}.json`);
++  writeFileSync(
++    path,
++    JSON.stringify({ kind: "pre-submit", film: FILM, shot, verdict, at: new Date().toISOString(), files: {} }),
++  );
++  return path;
++}
++
++test("billableSeconds：向上取整，余量不足 0.5 秒再加 1 秒", () => {
++  assert.equal(billableSeconds(4), 5);
++  assert.equal(billableSeconds(4.4), 5);
++  assert.equal(billableSeconds(4.5), 6);
++  assert.equal(billableSeconds(4.6), 6);
++  assert.equal(billableSeconds(0.3), 2);
++});
++
++test("两镜各 4.4 秒：mini 合计 5.0，2.5 合计 15.0；reviewHash 是最新审核文件的哈希", async () => {
++  await withFilm({ budget: 100, shots: { S01: 4.4, S02: 4.4 } }, (dir) => {
++    review(dir, "S01", 1, "pass");
++    const latest = review(dir, "S01", 2, "pass");
++    review(dir, "S02", 1, "pass");
++    const q = buildQuote(FILM, ["S01", "S02"]);
++    assert.equal(q.model, "mini");
++    assert.equal(q.modelId, "doubao-seedance-2-0-mini-260615");
++    assert.equal(q.totalCNY, 5.0);
++    assert.equal(q.overBudget, false);
++    assert.deepEqual(q.shots.map((s) => [s.shot, s.seconds, s.billable]), [["S01", 4.4, 5], ["S02", 4.4, 5]]);
++    assert.equal(q.shots[0].reviewHash, sha256File(latest));
++    const q25 = buildQuote(FILM, ["S01", "S02"], "2.5");
++    assert.equal(q25.modelId, "doubao-seedance-2-5-260628");
++    assert.equal(q25.totalCNY, 15.0);
++  });
++});
++
++test("预算 10、已花 6、报价 5：overBudget，打印以超预算开头，退出码 2", async () => {
++  await withFilm({ budget: 10, shots: { S01: 4.4, S02: 4.4 }, spent: [2.5, 3.5] }, async (dir, out) => {
++    review(dir, "S01", 1, "pass");
++    review(dir, "S02", 1, "pass");
++    const q = buildQuote(FILM, ["S01", "S02"]);
++    assert.equal(q.spentCNY, 6);
++    assert.equal(q.budgetCNY, 10);
++    assert.equal(q.overBudget, true);
++    const code = await main([FILM, "--shots", "S01,S02"]);
++    assert.equal(code, 2);
++    assert.match(out.at(-1)!, /^超预算/);
++    const saved = JSON.parse(readFileSync(join(dir, "quotes", "Q1.json"), "utf8"));
++    assert.equal(saved.overBudget, true);
++  });
++});
++
++test("镜头没有审核、最新审核不通过时报错", async () => {
++  await withFilm({ budget: 100, shots: { S01: 4, S02: 4 } }, (dir) => {
++    review(dir, "S02", 1, "pass");
++    assert.throws(() => buildQuote(FILM, ["S01", "S02"]), /S01 还没有通过提交前审核/);
++    review(dir, "S02", 2, "fail");
++    assert.throws(() => buildQuote(FILM, ["S02"]), /S02 还没有通过提交前审核/);
++    // v10 比 v9 新（数字比较，不是字符串比较）
++    review(dir, "S01", 9, "fail");
++    review(dir, "S01", 10, "pass");
++    assert.equal(buildQuote(FILM, ["S01"]).totalCNY, 2.5);
++  });
++});
++
++test("连续两次报价得到 Q1、Q2，打印报价句子", async () => {
++  await withFilm({ budget: 100, shots: { S01: 4.4, S02: 4.4 }, spent: [1] }, async (dir, out) => {
++    review(dir, "S01", 1, "pass");
++    review(dir, "S02", 1, "pass");
++    assert.equal(await main([FILM, "--shots", "S01,S02"]), 0);
++    assert.equal(
++      out.at(-1),
++      "报价 Q1：2 镜 10 秒 mini 约 ¥5.0（估算，以账单为准）；已花 ¥1.0，预算余 ¥99.0",
++    );
++    assert.equal(await main([FILM, "--shots", "S01", "--model", "2.5"]), 0);
++    assert.match(out.at(-1)!, /^报价 Q2：1 镜 5 秒 2\.5 约 ¥7\.5/);
++    assert.deepEqual(readdirSync(join(dir, "quotes")).sort(), ["Q1.json", "Q2.json"]);
++    const q2 = JSON.parse(readFileSync(join(dir, "quotes", "Q2.json"), "utf8"));
++    assert.equal(q2.id, "Q2");
++    assert.equal(q2.film, FILM);
++    assert.equal(q2.model, "2.5");
++  });
++});
++
++test("没设总预算、未知镜头、缺参数时退出码 2 且不写报价", async () => {
++  await withFilm({ budget: null, shots: { S01: 4 } }, async (dir, out) => {
++    review(dir, "S01", 1, "pass");
++    assert.equal(await main([FILM, "--shots", "S01"]), 2);
++    assert.match(out.at(-1)!, /还没有设总预算/);
++    assert.deepEqual(readdirSync(join(dir, "quotes")), []);
++  });
++  await withFilm({ budget: 100, shots: { S01: 4 } }, async (dir, out) => {
++    review(dir, "S01", 1, "pass");
++    assert.equal(await main([FILM, "--shots", "S01,S09"]), 2);
++    assert.match(out.at(-1)!, /没有这个镜头：S09/);
++    assert.equal(await main([FILM]), 2);
++    assert.equal(await main([FILM, "--shots", "S01", "--model", "3.0"]), 2);
++    assert.deepEqual(readdirSync(join(dir, "quotes")), []);
++  });
++});

@@ -1,0 +1,309 @@
+# Review package: 05ccef9..HEAD
+
+## Commits
+e9c6de2 feat: 批准记录
+
+## Files changed
+ scripts/approve.ts    | 121 ++++++++++++++++++++++++++++++++++++
+ tests/approve.test.ts | 165 ++++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 286 insertions(+)
+
+## Diff
+diff --git a/scripts/approve.ts b/scripts/approve.ts
+new file mode 100644
+index 0000000..85b2ded
+--- /dev/null
++++ b/scripts/approve.ts
+@@ -0,0 +1,121 @@
++import { mkdirSync, readFileSync } from "node:fs";
++import { join } from "node:path";
++import { filmDir } from "./lib/paths.ts";
++import { writeNew } from "./lib/versioned.ts";
++import type { Quote } from "./quote.ts";
++
++export interface Approval {
++  quote: string;
++  totalCNY: number;
++  model: Quote["model"];
++  shots: Quote["shots"];
++  said: string;
++  at: string;
++}
++
++const USAGE = '用法：approve.ts <片名> Q<n> --said "<本人在对话里的原话>"';
++const QUOTE_ID_RE = /^Q\d+$/;
++
++function assertQuoteId(id: string): void {
++  if (typeof id !== "string" || !QUOTE_ID_RE.test(id)) throw new Error(`报价号不合法：${id}`);
++}
++
++/** 读文件；不存在返回 null。 */
++function readOrNull(path: string): string | null {
++  try {
++    return readFileSync(path, "utf8");
++  } catch (err) {
++    if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
++    throw err;
++  }
++}
++
++/** 原话里要有 "批准 Q3"（半角空格），且后面不能紧跟数字（"批准 Q31" 不算 Q3）。 */
++export function saidApproves(said: string, quoteId: string): boolean {
++  assertQuoteId(quoteId);
++  return new RegExp(`批准 ${quoteId}(?!\\d)`).test(said);
++}
++
++/** 读 approvals/<报价号>.json；没有批准过返回 null。报价号不合法时抛错。 */
++export function readApproval(
++  film: string,
++  quoteId: string,
++): { quote: string; totalCNY: number; said: string; at: string } | null {
++  assertQuoteId(quoteId);
++  const raw = readOrNull(join(filmDir(film), "approvals", `${quoteId}.json`));
++  if (raw === null) return null;
++  return JSON.parse(raw) as Approval;
++}
++
++export async function main(argv: string[]): Promise<number> {
++  const [film, id, ...rest] = argv;
++  let said: string | undefined;
++  for (let i = 0; i < rest.length; i++) {
++    if (rest[i] === "--said" && i + 1 < rest.length) said = rest[++i];
++    else {
++      console.error(USAGE);
++      return 2;
++    }
++  }
++  if (!film || !id || !QUOTE_ID_RE.test(id) || said === undefined) {
++    console.error(USAGE);
++    return 2;
++  }
++  let dir: string;
++  try {
++    dir = filmDir(film);
++  } catch (err) {
++    console.error((err as Error).message);
++    return 2;
++  }
++
++  const raw = readOrNull(join(dir, "quotes", `${id}.json`));
++  if (raw === null) {
++    console.error(`报价 ${id} 不存在`);
++    return 1;
++  }
++  let q: Quote;
++  try {
++    q = JSON.parse(raw) as Quote;
++  } catch {
++    console.error(`报价 ${id} 不是合法的 JSON`);
++    return 1;
++  }
++  if (typeof q?.totalCNY !== "number" || !Number.isFinite(q.totalCNY) || !Array.isArray(q.shots)) {
++    console.error(`报价 ${id} 内容不完整`);
++    return 1;
++  }
++  // 只有明确 overBudget === false 才放行（字段缺失或坏值都按超预算处理，失败即关）。
++  if (q.overBudget !== false) {
++    console.error(`报价 ${id} 超预算，不能批准`);
++    return 1;
++  }
++  if (!saidApproves(said, id)) {
++    console.error(`本人原话里没有"批准 ${id}"`);
++    return 1;
++  }
++
++  const approval: Approval = {
++    quote: id,
++    totalCNY: q.totalCNY,
++    model: q.model,
++    shots: q.shots,
++    said,
++    at: new Date().toISOString(),
++  };
++  const approvalsDir = join(dir, "approvals");
++  mkdirSync(approvalsDir, { recursive: true });
++  try {
++    writeNew(join(approvalsDir, `${id}.json`), JSON.stringify(approval, null, 2) + "\n");
++  } catch (err) {
++    if ((err as NodeJS.ErrnoException).code === "EEXIST") {
++      console.error(`报价 ${id} 已经批准过`);
++      return 1;
++    }
++    throw err;
++  }
++  console.log(`已记下批准：${id} ¥${q.totalCNY.toFixed(1)}`);
++  return 0;
++}
++
++if (import.meta.main) process.exit(await main(process.argv.slice(2)));
+diff --git a/tests/approve.test.ts b/tests/approve.test.ts
+new file mode 100644
+index 0000000..b8aed40
+--- /dev/null
++++ b/tests/approve.test.ts
+@@ -0,0 +1,165 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { main, readApproval } from "../scripts/approve.ts";
++import type { Quote } from "../scripts/quote.ts";
++
++const FILM = "测试片";
++
++/** 临时 FILM_ROOT（含一部片子，没有 approvals/ 目录）+ 环境变量恢复 + 捕获 console 输出。 */
++async function withFilm(fn: (dir: string, out: string[]) => Promise<void> | void): Promise<void> {
++  const root = mkdtempSync(join(tmpdir(), "film-approve-"));
++  const saved = process.env.FILM_ROOT;
++  const out: string[] = [];
++  const log = console.log;
++  const err = console.error;
++  console.log = (...a: unknown[]) => void out.push(a.join(" "));
++  console.error = (...a: unknown[]) => void out.push(a.join(" "));
++  try {
++    process.env.FILM_ROOT = root;
++    const dir = join(root, "films", FILM);
++    mkdirSync(join(dir, "quotes"), { recursive: true });
++    await fn(dir, out);
++  } finally {
++    console.log = log;
++    console.error = err;
++    if (saved === undefined) delete process.env.FILM_ROOT;
++    else process.env.FILM_ROOT = saved;
++    rmSync(root, { recursive: true, force: true });
++  }
++}
++
++function writeQuote(dir: string, id: string, over: Partial<Quote> = {}): Quote {
++  const q: Quote = {
++    id,
++    film: FILM,
++    model: "mini",
++    modelId: "doubao-seedance-2-0-mini-260615",
++    shots: [
++      { shot: "S01", seconds: 4.4, billable: 5, reviewHash: "a".repeat(64) },
++      { shot: "S02", seconds: 4.4, billable: 5, reviewHash: "b".repeat(64) },
++    ],
++    totalCNY: 5,
++    spentCNY: 1,
++    budgetCNY: 100,
++    overBudget: false,
++    createdAt: "2026-11-07T00:00:00.000Z",
++    ...over,
++  };
++  writeFileSync(join(dir, "quotes", `${id}.json`), JSON.stringify(q, null, 2) + "\n");
++  return q;
++}
++
++function approvals(dir: string): string[] {
++  try {
++    return readdirSync(join(dir, "approvals"));
++  } catch {
++    return [];
++  }
++}
++
++test("成功：写 approvals/Q3.json，打印已记下批准，readApproval 能读回", async () => {
++  await withFilm(async (dir, out) => {
++    const q = writeQuote(dir, "Q3");
++    const said = "好的，批准 Q3，开始生成吧";
++    assert.equal(await main([FILM, "Q3", "--said", said]), 0);
++    assert.equal(out.at(-1), "已记下批准：Q3 ¥5.0");
++    const a = JSON.parse(readFileSync(join(dir, "approvals", "Q3.json"), "utf8"));
++    assert.equal(a.quote, "Q3");
++    assert.equal(a.totalCNY, 5);
++    assert.equal(a.model, "mini");
++    assert.deepEqual(a.shots, q.shots);
++    assert.equal(a.said, said);
++    assert.ok(!Number.isNaN(Date.parse(a.at)));
++    const r = readApproval(FILM, "Q3");
++    assert.ok(r);
++    assert.equal(r.quote, "Q3");
++    assert.equal(r.totalCNY, 5);
++    assert.equal(r.said, said);
++    assert.equal(r.at, a.at);
++  });
++});
++
++test("报价不存在：退出 1，不写文件；readApproval 返回 null", async () => {
++  await withFilm(async (dir, out) => {
++    assert.equal(await main([FILM, "Q3", "--said", "批准 Q3"]), 1);
++    assert.equal(out.at(-1), "报价 Q3 不存在");
++    assert.deepEqual(approvals(dir), []);
++    assert.equal(readApproval(FILM, "Q3"), null);
++  });
++});
++
++test("报价超预算：退出 1，不写文件", async () => {
++  await withFilm(async (dir, out) => {
++    writeQuote(dir, "Q3", { overBudget: true });
++    assert.equal(await main([FILM, "Q3", "--said", "批准 Q3"]), 1);
++    assert.equal(out.at(-1), "报价 Q3 超预算，不能批准");
++    assert.deepEqual(approvals(dir), []);
++  });
++});
++
++test("原话里没有“批准 Q3”：退出 1，不写文件（含全角空格、无空格、别的报价号）", async () => {
++  await withFilm(async (dir, out) => {
++    writeQuote(dir, "Q3");
++    for (const said of ["好的", "批准Q3", "批准　Q3", "批准 Q2", "批准 q3", ""]) {
++      assert.equal(await main([FILM, "Q3", "--said", said]), 1, said);
++      assert.equal(out.at(-1), '本人原话里没有"批准 Q3"');
++    }
++    assert.deepEqual(approvals(dir), []);
++  });
++});
++
++test("Q3 与 Q31：“批准 Q31” 不能批准 Q3，“批准 Q3” 不能批准 Q31", async () => {
++  await withFilm(async (dir, out) => {
++    writeQuote(dir, "Q3");
++    writeQuote(dir, "Q31");
++    assert.equal(await main([FILM, "Q3", "--said", "批准 Q31"]), 1);
++    assert.equal(out.at(-1), '本人原话里没有"批准 Q3"');
++    assert.equal(await main([FILM, "Q31", "--said", "批准 Q3"]), 1);
++    assert.equal(out.at(-1), '本人原话里没有"批准 Q31"');
++    assert.deepEqual(approvals(dir), []);
++    assert.equal(await main([FILM, "Q3", "--said", "批准 Q31，也批准 Q3。"]), 0);
++    assert.equal(await main([FILM, "Q31", "--said", "批准 Q31"]), 0);
++    assert.deepEqual(approvals(dir).sort(), ["Q3.json", "Q31.json"]);
++  });
++});
++
++test("已经批准过：退出 1，原批准文件不变", async () => {
++  await withFilm(async (dir, out) => {
++    writeQuote(dir, "Q3");
++    assert.equal(await main([FILM, "Q3", "--said", "批准 Q3"]), 0);
++    const before = readFileSync(join(dir, "approvals", "Q3.json"), "utf8");
++    assert.equal(await main([FILM, "Q3", "--said", "再次批准 Q3"]), 1);
++    assert.equal(out.at(-1), "报价 Q3 已经批准过");
++    assert.equal(readFileSync(join(dir, "approvals", "Q3.json"), "utf8"), before);
++  });
++});
++
++test("参数不对：退出 2（报价号格式、缺 --said、多余参数、片名不合法）", async () => {
++  await withFilm(async (dir) => {
++    writeQuote(dir, "Q3");
++    for (const argv of [
++      [FILM, "q3", "--said", "批准 q3"],
++      [FILM, "Q", "--said", "批准 Q"],
++      [FILM, "Q3x", "--said", "批准 Q3x"],
++      [FILM, "../Q3", "--said", "批准 ../Q3"],
++      [FILM, "Q3"],
++      [FILM, "Q3", "--said"],
++      [FILM, "Q3", "--said", "批准 Q3", "--extra"],
++      [FILM],
++      [],
++      ["../x", "Q3", "--said", "批准 Q3"],
++    ]) {
++      assert.equal(await main(argv), 2, JSON.stringify(argv));
++    }
++    assert.deepEqual(approvals(dir), []);
++  });
++});
++
++test("readApproval：报价号不合法时抛错", async () => {
++  await withFilm(() => {
++    assert.throws(() => readApproval(FILM, "../Q3"), /报价号不合法/);
++  });
++});

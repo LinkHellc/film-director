@@ -1,0 +1,1867 @@
+# Review package: e9c6de2..HEAD
+
+## Commits
+1dd6496 feat: Seedance 第三方网关与花钱闸门
+
+## Files changed
+ config/pricing.json         |   4 +-
+ scripts/approve.ts          |   8 +-
+ scripts/lib/versioned.ts    |  21 +-
+ scripts/lib/video-api.ts    | 285 +++++++++++++++++++++++++
+ scripts/quote.ts            |  60 ++++--
+ scripts/seedance.ts         | 508 ++++++++++++++++++++++++++++++++++++++++++++
+ tests/approve.test.ts       |  19 ++
+ tests/fakes/video-server.ts | 168 +++++++++++++++
+ tests/quote.test.ts         |  35 +--
+ tests/seedance.test.ts      | 440 ++++++++++++++++++++++++++++++++++++++
+ 10 files changed, 1506 insertions(+), 42 deletions(-)
+
+## Diff
+diff --git a/config/pricing.json b/config/pricing.json
+index ddf2b3a..813c829 100644
+--- a/config/pricing.json
++++ b/config/pricing.json
+@@ -1,4 +1,4 @@
+ { "default": "mini",
+   "models": {
+-    "mini": { "id": "doubao-seedance-2-0-mini-260615", "cnyPerSecond720p": 0.5 },
+-    "2.5":  { "id": "doubao-seedance-2-5-260628",      "cnyPerSecond720p": 1.5 } } }
++    "mini": { "id": "seedance-2.0-mini", "cnyPerSecond720p": 0.15, "firstLastFrame": true },
++    "2.5":  { "id": "seedance-2.5",      "cnyPerSecond720p": 0.55, "firstLastFrame": false } } }
+diff --git a/scripts/approve.ts b/scripts/approve.ts
+index 85b2ded..c977eb7 100644
+--- a/scripts/approve.ts
++++ b/scripts/approve.ts
+@@ -23,24 +23,28 @@ function assertQuoteId(id: string): void {
+ /** 读文件；不存在返回 null。 */
+ function readOrNull(path: string): string | null {
+   try {
+     return readFileSync(path, "utf8");
+   } catch (err) {
+     if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+     throw err;
+   }
+ }
+ 
+-/** 原话里要有 "批准 Q3"（半角空格），且后面不能紧跟数字（"批准 Q31" 不算 Q3）。 */
++/**
++ * 原话里要有 "批准 Q3"（半角空格），且后面不能紧跟数字（"批准 Q31" 不算 Q3）；
++ * "批准" 前 3 个字以内出现 不/别/勿/没/未 的不算（"不批准"、"先不要批准"、"别急着批准"）。
++ * 宁可错拒（如"不错，批准 Q3"会被拒），不可错收。
++ */
+ export function saidApproves(said: string, quoteId: string): boolean {
+   assertQuoteId(quoteId);
+-  return new RegExp(`批准 ${quoteId}(?!\\d)`).test(said);
++  return new RegExp(`(?<![不别勿没未][^]{0,2})批准 ${quoteId}(?!\\d)`).test(said);
+ }
+ 
+ /** 读 approvals/<报价号>.json；没有批准过返回 null。报价号不合法时抛错。 */
+ export function readApproval(
+   film: string,
+   quoteId: string,
+ ): { quote: string; totalCNY: number; said: string; at: string } | null {
+   assertQuoteId(quoteId);
+   const raw = readOrNull(join(filmDir(film), "approvals", `${quoteId}.json`));
+   if (raw === null) return null;
+diff --git a/scripts/lib/versioned.ts b/scripts/lib/versioned.ts
+index e0f3391..6da9ab3 100644
+--- a/scripts/lib/versioned.ts
++++ b/scripts/lib/versioned.ts
+@@ -1,28 +1,39 @@
+ import { readdirSync, writeFileSync } from "node:fs";
+ import { join } from "node:path";
+ 
+ function escapeRe(s: string): string {
+   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+ }
+ 
+-/** 返回 <dir>/<base>-v<n>.<ext>，n = 已有最大版本号 + 1，从 1 开始；目录不存在视为空。 */
+-export function nextVersionPath(dir: string, base: string, ext: string): string {
++/** <dir> 里 <base>-v<n>.<ext> 的最大 n（数字比较）和对应文件名；没有为 0 / null。目录不存在视为空。 */
++function maxVersion(dir: string, base: string, ext: string): { n: number; name: string | null } {
+   const re = new RegExp(`^${escapeRe(base)}-v(\\d+)\\.${escapeRe(ext)}$`);
+   let names: string[] = [];
+   try {
+     names = readdirSync(dir);
+   } catch (err) {
+     if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+   }
+-  let max = 0;
++  let best = { n: 0, name: null as string | null };
+   for (const name of names) {
+     const m = re.exec(name);
+-    if (m) max = Math.max(max, Number(m[1]));
++    if (m && Number(m[1]) > best.n) best = { n: Number(m[1]), name };
+   }
+-  return join(dir, `${base}-v${max + 1}.${ext}`);
++  return best;
++}
++
++/** 返回 <dir>/<base>-v<n>.<ext>，n = 已有最大版本号 + 1，从 1 开始；目录不存在视为空。 */
++export function nextVersionPath(dir: string, base: string, ext: string): string {
++  return join(dir, `${base}-v${maxVersion(dir, base, ext).n + 1}.${ext}`);
++}
++
++/** 已有的最新版本 <dir>/<base>-v<n>.<ext>（n 最大）；没有返回 null。 */
++export function latestVersionPath(dir: string, base: string, ext: string): string | null {
++  const { name } = maxVersion(dir, base, ext);
++  return name === null ? null : join(dir, name);
+ }
+ 
+ /** 只写新文件：已存在就抛错（flag "wx"），不覆盖。 */
+ export function writeNew(path: string, data: string | Uint8Array): void {
+   writeFileSync(path, data, { flag: "wx" });
+ }
+diff --git a/scripts/lib/video-api.ts b/scripts/lib/video-api.ts
+new file mode 100644
+index 0000000..f98a340
+--- /dev/null
++++ b/scripts/lib/video-api.ts
+@@ -0,0 +1,285 @@
++/*
++ * Seedance 视频接口（第三方 new-api 网关 DragonAPI）。
++ *
++ * ── Step 1 核实结果（2026-11-07；只读了公开文档与源码，没有发任何会建任务或扣费的请求） ──
++ * 来源：
++ *   [A] 网关公开价目 GET https://newapi.dragon3api.com/api/pricing（副本 .superpowers/sdd/…/gateway-pricing.json）
++ *   [B] 网关公开状态 GET https://newapi.dragon3api.com/api/status：version "v1.0.0-rc.48-dragonapi"，docs_link https://docs.dragon3api.com/
++ *   [C] https://docs.dragon3api.com/model/video-seedance-mini-generation
++ *   [D] https://docs.dragon3api.com/model/video-seedance-2-5-generation
++ *   [E] https://docs.dragon3api.com/videos
++ *   [F] https://docs.dragon3api.com/tasks
++ *   [G] https://docs.dragon3api.com/video-references
++ *   [H] https://docs.dragon3api.com/errors
++ *   [I] new-api 源码 https://github.com/QuantumNous/new-api ：service/billing.go、service/billing_session.go
++ *       （预扣失败 → HTTP 403，code "insufficient_user_quota" / "pre_consume_token_quota_failed"）、
++ *       relaykit/types/error.go（上述 code 常量）、relay/relay_task.go（预扣在发上游请求之前："余额不足就不发请求"）、
++ *       controller/relay.go respondTaskError（错误体 {code,message,data}）、plugins/tasks/doubao/plugin.js、router/video-router.go。
++ *
++ * 创建 POST /v1/videos，Authorization: Bearer <key>，JSON（也接受 multipart，这里只用 JSON）[C][E][G]：
++ *   { "model": "seedance-2.0-mini", "prompt": "...", "seconds": 5, "resolution": "720p", "aspect_ratio": "16:9",
++ *     "task_mode": "first_last_frame",
++ *     "content": [ {"type":"image_url","role":"first_frame","url":"data:image/png;base64,..."},
++ *                  {"type":"image_url","role":"last_frame", "url":"data:image/png;base64,..."} ] }
++ *   - 首尾帧：[G] 原文要点"首尾帧用 task_mode: first_last_frame，content 中两张图片的角色依次为 first_frame、
++ *     last_frame，每张图仍填写完整 data URL"；url 必须是完整 data URL（不是裸 base64、外部网址或本地路径）。
++ *     单图 input_reference 默认按"参考图"处理，不是首帧——所以不用 input_reference。
++ *   - 时长 seconds（整数秒）：seedance-2.0-mini 4–15 秒，seedance-2.5 4–30 秒 [C][D][E][G]；不传按最短。
++ *     → billableSeconds 下限由 2 改为 4（scripts/quote.ts）。上限未在本地检查：超了网关 400、不建任务不扣费 [E][G]。
++ *   - 分辨率 resolution "720p"；比例 aspect_ratio ∈ 16:9 9:16 1:1 4:3 3:4 21:9 [C]。
++ *   - 返回 {"id":"task_xxx","status":"queued",...}，id 是公开任务 ID [E][F]。
++ *   - 规格不符 → 400，不建任务、不扣费 [E][G]。每次 POST 都是新任务、单独计费；幂等键不会合并；
++ *     超时且没拿到 id 时"不要直接重发"，要到任务日志核对 [G]。
++ * 查询 GET /v1/videos/{id}：status ∈ queued / in_progress / completed / failed，失败看 error [F]。
++ * 下载 GET /v1/videos/{id}/content，带同一个 Bearer Key，返回视频二进制 [C][F]。
++ * 计费：费用 = 输出秒数 × 单价（+ 参考视频秒数 × 单价，这里不用参考视频），不足 1 秒按 1 秒计；
++ *   seedance-2.0-mini 720p ¥0.15/秒，首帧/首尾帧同价 ¥0.15/秒；seedance-2.5 720p ¥0.55/秒 [A][G]。
++ *   提交时按上限预扣（2.0 系列 15 秒，2.5 系列 30 秒），完成后按实际结算、退差额；失败全额退回 [G]。
++ *   → 余额要够"上限预扣"才能提交；不够时网关拒绝（不发上游请求）。
++ * seedance-2.5 是否支持首尾帧：不支持。[G] 原文"seedance-2.5、seedance-1.5-pro 不提供首帧模式"，
++ *   [D] 生成方式只有"文生视频、参考生成"。→ pricing.json 里 2.5 的 firstLastFrame 为 false。
++ * 余额或额度不足：new-api 在发上游请求前预扣，失败返回 HTTP 403 + code insufficient_user_quota（钱包或订阅不足）
++ *   或 pre_consume_token_quota_failed（Key 自身额度不足）[I]；网关文档另列"402／余额不足"[H]。
++ *   → 402、上述 code、或正文含"余额不足/额度不足/quota is not enough/insufficient…quota|balance"都按欠费处理。
++ *   403 "This token has no access to model" 等其他 403 不是欠费，按普通拒绝处理（同样停止整批）[H]。
++ * 未核实（按最保守方式实现）：
++ *   - 欠费时的确切中文文案（网关 i18n 文本没看到原文）→ 主要靠 HTTP 状态和 code 判断。
++ *   - 查询结果里有没有可直接下载的视频网址 → 一律走 /content；若响应里带了网址，只在 /content 失败时
++ *     用它下载，而且不带 Key（防止把 Key 发给别的主机）。
++ *   - JSON 请求体大小上限（multipart 写明 64 MiB）→ 不在本地限制，超了网关会报错（4xx 不扣费）。
++ *   - 上游内容审核/人脸检测在排队阶段执行，失败的任务"失败则全额退回"[G]。
++ */
++import { readFileSync, writeFileSync } from "node:fs";
++import { extname } from "node:path";
++
++/** 余额或额度不足。 */
++export class ArrearsError extends Error {}
++
++/**
++ * 网关拒绝或请求失败。uncertain = true 表示不知道任务建没建成（断线、超时、5xx、2xx 却没有 id），
++ * 可能已经扣费，不能直接重发；false 表示网关明确拒绝了（4xx），没有建任务。
++ */
++export class GatewayError extends Error {
++  status: number | null;
++  uncertain: boolean;
++  constructor(message: string, status: number | null, uncertain: boolean) {
++    super(message);
++    this.status = status;
++    this.uncertain = uncertain;
++  }
++}
++
++/** 没有设置 SEEDANCE_API_KEY。 */
++export class MissingKeyError extends Error {
++  constructor() {
++    super("没有设置 SEEDANCE_API_KEY");
++  }
++}
++
++export interface CreateRequest {
++  model: string;
++  prompt: string;
++  firstFrame: string; // 本地图片路径
++  lastFrame: string; // 本地图片路径
++  seconds: number; // 整数秒（计费秒数）
++  resolution: "720p";
++  aspectRatio?: string; // 16:9 等；不在网关支持列表里就不传
++}
++
++export type TaskStatus = "queued" | "running" | "succeeded" | "failed";
++
++const DEFAULT_BASE = "https://newapi.dragon3api.com";
++const ASPECTS = ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"];
++const MIME: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp" };
++const CREATE_TIMEOUT_MS = 180_000;
++const QUERY_TIMEOUT_MS = 30_000;
++const DOWNLOAD_TIMEOUT_MS = 600_000;
++
++export function baseUrl(): string {
++  return (process.env.SEEDANCE_BASE_URL || DEFAULT_BASE).replace(/\/+$/, "");
++}
++
++/** 读 Key；没设抛 MissingKeyError。Key 只放进请求头，不进任何输出。 */
++export function apiKey(): string {
++  const key = process.env.SEEDANCE_API_KEY;
++  if (!key || !key.trim()) throw new MissingKeyError();
++  return key.trim();
++}
++
++/** 把文本里的 Key（原文和 Bearer 形式）换成 ***。所有要打印的网关文本都先过这里。 */
++export function scrub(text: string): string {
++  const key = process.env.SEEDANCE_API_KEY?.trim();
++  let s = String(text);
++  if (key) s = s.split(key).join("***");
++  return s.replace(/Bearer\s+\S+/gi, "Bearer ***");
++}
++
++function firstChars(s: string, n: number): string {
++  return Array.from(s).slice(0, n).join("");
++}
++
++function dataUrl(path: string): string {
++  const mime = MIME[extname(path).toLowerCase()];
++  if (!mime) throw new Error(`首尾帧只支持 png/jpg/webp：${path.replace(/\\/g, "/")}`);
++  return `data:${mime};base64,${readFileSync(path).toString("base64")}`;
++}
++
++/** 从错误正文里取 code 和 message（兼容 {code,message} 与 {error:{code,message}}）。 */
++function errorInfo(text: string): { code: string; message: string } {
++  try {
++    const j = JSON.parse(text);
++    const e = j && typeof j.error === "object" && j.error !== null ? j.error : j;
++    return { code: String(e?.code ?? ""), message: String(e?.message ?? (typeof j?.error === "string" ? j.error : text)) };
++  } catch {
++    return { code: "", message: text };
++  }
++}
++
++const ARREARS_CODES = new Set(["insufficient_user_quota", "pre_consume_token_quota_failed", "insufficient_quota"]);
++const ARREARS_TEXT = /余额不足|额度不足|欠费|quota is not enough|insufficient[_ ](user[_ ])?(quota|balance)/i;
++
++export function isArrears(status: number, text: string): boolean {
++  if (status === 402) return true;
++  const { code, message } = errorInfo(text);
++  return ARREARS_CODES.has(code) || ARREARS_TEXT.test(message) || ARREARS_TEXT.test(code);
++}
++
++function describe(status: number, text: string): string {
++  const { code, message } = errorInfo(text);
++  return scrub(`HTTP ${status}${code ? ` ${code}` : ""}：${firstChars(message.trim() || "（无正文）", 300)}`);
++}
++
++async function send(method: string, path: string, body: unknown, timeoutMs: number, redirect: RequestRedirect = "error"): Promise<Response> {
++  const headers: Record<string, string> = { authorization: `Bearer ${apiKey()}`, accept: "application/json" };
++  if (body !== undefined) headers["content-type"] = "application/json";
++  return fetch(`${baseUrl()}${path}`, {
++    method,
++    headers,
++    body: body === undefined ? undefined : JSON.stringify(body),
++    signal: AbortSignal.timeout(timeoutMs),
++    redirect, // 默认不跟随跳转：带 Key 的请求不能被引到别的主机
++  });
++}
++
++/** 建一个首尾帧视频任务。欠费抛 ArrearsError；其他失败抛 GatewayError（见 uncertain）。 */
++export async function createTask(req: CreateRequest): Promise<{ id: string }> {
++  if (!Number.isInteger(req.seconds) || req.seconds < 4) throw new Error(`秒数不合法：${req.seconds}`);
++  if (req.resolution !== "720p") throw new Error(`分辨率不合法：${req.resolution}`);
++  const body: Record<string, unknown> = {
++    model: req.model,
++    prompt: req.prompt,
++    seconds: req.seconds,
++    resolution: req.resolution,
++  };
++  if (req.aspectRatio && ASPECTS.includes(req.aspectRatio)) body.aspect_ratio = req.aspectRatio;
++  body.task_mode = "first_last_frame";
++  body.content = [
++    { type: "image_url", role: "first_frame", url: dataUrl(req.firstFrame) },
++    { type: "image_url", role: "last_frame", url: dataUrl(req.lastFrame) },
++  ];
++  apiKey(); // 读图之后、发请求之前再确认一次 Key
++
++  let res: Response;
++  try {
++    res = await send("POST", "/v1/videos", body, CREATE_TIMEOUT_MS);
++  } catch (err) {
++    throw new GatewayError(scrub(`连不上网关或超时（${(err as Error).message}）`), null, true);
++  }
++  let text = "";
++  try {
++    text = await res.text();
++  } catch (err) {
++    throw new GatewayError(scrub(`读网关回复失败（${(err as Error).message}）`), res.status, res.ok || res.status >= 500);
++  }
++  if (res.ok) {
++    let id: unknown;
++    try {
++      const j = JSON.parse(text);
++      id = j?.id ?? j?.task_id;
++    } catch {
++      /* 落到下面 */
++    }
++    if (typeof id !== "string" || !id.trim()) throw new GatewayError(`网关回复里没有任务编号（HTTP ${res.status}）`, res.status, true);
++    return { id: id.trim() };
++  }
++  if (isArrears(res.status, text)) throw new ArrearsError(describe(res.status, text));
++  // 4xx：网关明确拒绝，没建任务；5xx：不确定
++  throw new GatewayError(describe(res.status, text), res.status, res.status >= 500);
++}
++
++/** 查任务。网关状态 queued / in_progress / completed / failed 映射为 queued / running / succeeded / failed；不认识的当 running。 */
++export async function getTask(id: string): Promise<{ status: TaskStatus; videoUrl?: string; error?: string }> {
++  let res: Response;
++  try {
++    res = await send("GET", `/v1/videos/${encodeURIComponent(id)}`, undefined, QUERY_TIMEOUT_MS);
++  } catch (err) {
++    throw new GatewayError(scrub(`查询失败（${(err as Error).message}）`), null, false);
++  }
++  const text = await res.text();
++  if (!res.ok) throw new GatewayError(`查询失败：${describe(res.status, text)}`, res.status, false);
++  let j: any;
++  try {
++    j = JSON.parse(text);
++  } catch {
++    throw new GatewayError("查询回复不是 JSON", res.status, false);
++  }
++  const raw = String(j?.status ?? "").toLowerCase();
++  const map: Record<string, TaskStatus> = {
++    queued: "queued",
++    submitted: "queued",
++    not_start: "queued",
++    in_progress: "running",
++    running: "running",
++    processing: "running",
++    completed: "succeeded",
++    succeeded: "succeeded",
++    success: "succeeded",
++    failed: "failed",
++    failure: "failed",
++    cancelled: "failed",
++    expired: "failed",
++  };
++  const status = map[raw] ?? "running";
++  const out: { status: TaskStatus; videoUrl?: string; error?: string } = { status };
++  const url = j?.video_url ?? j?.url ?? j?.metadata?.url ?? j?.content?.video_url;
++  if (typeof url === "string" && /^https?:\/\//.test(url)) out.videoUrl = url;
++  if (status === "failed") {
++    const e = j?.error;
++    const msg = typeof e === "string" ? e : e?.message ?? j?.fail_reason ?? raw;
++    out.error = scrub(firstChars(String(msg || "失败"), 300));
++  }
++  return out;
++}
++
++/**
++ * 下载视频到 dest（只写新文件，已存在就报错）。先走 GET /v1/videos/{id}/content（带 Key）；
++ * 失败且有 url 时，再不带 Key 直接下载 url。
++ */
++export async function downloadVideo(id: string, url: string | undefined, dest: string): Promise<void> {
++  let bytes: Uint8Array | null = null;
++  let why = "";
++  try {
++    let res = await send("GET", `/v1/videos/${encodeURIComponent(id)}/content`, undefined, DOWNLOAD_TIMEOUT_MS, "manual");
++    const location = res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
++    if (location) {
++      // 网关把下载转到存储地址：跟过去，但不带 Key
++      res = await fetch(new URL(location, baseUrl()), { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });
++    }
++    if (res.ok) bytes = new Uint8Array(await res.arrayBuffer());
++    else why = describe(res.status, await res.text());
++  } catch (err) {
++    if (err instanceof MissingKeyError) throw err;
++    why = scrub((err as Error).message);
++  }
++  if ((!bytes || bytes.length === 0) && url) {
++    try {
++      const res = await fetch(url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });
++      if (res.ok) bytes = new Uint8Array(await res.arrayBuffer());
++      else why += `；网址下载 HTTP ${res.status}`;
++    } catch (err) {
++      why += `；网址下载失败（${scrub((err as Error).message)}）`;
++    }
++  }
++  if (!bytes || bytes.length === 0) throw new GatewayError(`下载失败：${why || "内容为空"}`, null, false);
++  writeFileSync(dest, bytes, { flag: "wx" });
++}
+diff --git a/scripts/quote.ts b/scripts/quote.ts
+index f2b7d20..f83465b 100644
+--- a/scripts/quote.ts
++++ b/scripts/quote.ts
+@@ -1,113 +1,139 @@
+ import { readFileSync, readdirSync } from "node:fs";
+ import { dirname, join, resolve } from "node:path";
+ import { fileURLToPath } from "node:url";
+ import { filmDir } from "./lib/paths.ts";
+ import { readState } from "./lib/state.ts";
+ import { writeNew } from "./lib/versioned.ts";
+ import { sha256File } from "./lib/hash.ts";
+ 
+-type Model = "mini" | "2.5";
++export type Model = "mini" | "2.5";
+ 
+ export interface Quote {
+   id: string;
+   film: string;
+   model: Model;
+   modelId: string;
+   shots: { shot: string; seconds: number; billable: number; reviewHash: string }[];
+   totalCNY: number;
+   spentCNY: number;
+   budgetCNY: number;
+   overBudget: boolean;
+   createdAt: string;
+ }
+ 
+-interface Pricing {
++export interface Pricing {
+   default: Model;
+-  models: Record<Model, { id: string; cnyPerSecond720p: number }>;
++  models: Record<Model, { id: string; cnyPerSecond720p: number; firstLastFrame?: boolean }>;
++}
++
++/** spend.jsonl 的一行。submit 写 {at,quote,shot,task,model,billable,cny}；结果不明时 task 为 null 且 uncertain 为 true。 */
++export interface SpendRow {
++  at?: string;
++  quote?: string;
++  shot?: string;
++  task?: string | null;
++  model?: string;
++  billable?: number;
++  cny: number;
++  uncertain?: boolean;
+ }
+ 
+ const USAGE = "用法：quote.ts <片名> --shots S01,S02 [--model mini|2.5]";
+ const EPS = 1e-9;
+ 
+ /** 价格表属于代码仓库，按本文件位置定位（与 FILM_ROOT 无关）。 */
+-function readPricing(): Pricing {
++export function readPricing(): Pricing {
+   const path = resolve(dirname(fileURLToPath(import.meta.url)), "..", "config", "pricing.json");
+   return JSON.parse(readFileSync(path, "utf8")) as Pricing;
+ }
+ 
+-function round1(x: number): number {
++export function round1(x: number): number {
+   return Math.round(x * 10) / 10;
+ }
+ 
+ function listNames(dir: string): string[] {
+   try {
+     return readdirSync(dir);
+   } catch (err) {
+     if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+     throw err;
+   }
+ }
+ 
+-/** 计费秒数：向上取整；余量不足（含等于）0.5 秒再加 1 秒；最少 2 秒。秒数必须是大于 0 的有限数。 */
++/**
++ * 计费秒数：向上取整；余量不足（含等于）0.5 秒再加 1 秒；最少 4 秒。秒数必须是大于 0 的有限数。
++ * 4 秒下限：网关文档写明 seedance-2.0-mini 4–15 秒、seedance-2.5 4–30 秒，seconds 是整数，
++ * 费用 = 输出秒数 × 单价（来源见 scripts/lib/video-api.ts 顶部注释）。上限因模型而异，超了网关返回 400（不建任务、不扣费）。
++ */
+ export function billableSeconds(seconds: number): number {
+   if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds <= 0) {
+     throw new Error(`秒数不合法：${seconds}`);
+   }
+   let n = Math.ceil(seconds - EPS);
+   if (n - seconds <= 0.5 + EPS) n += 1;
+-  return Math.max(n, 2);
++  return Math.max(n, 4);
+ }
+ 
+-/** 镜头最新（n 最大）的 pre-submit 审核文件；必须 verdict 为 pass，返回其哈希。 */
+-function passedReviewHash(dir: string, shot: string): string {
++/** 镜头最新（n 最大，按数字比较）的 pre-submit 审核记录路径；没有返回 null。 */
++export function latestReviewPath(dir: string, shot: string): string | null {
+   const esc = shot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+   const re = new RegExp(`^pre-submit-${esc}-v(\\d+)\\.json$`);
+   let best = 0;
+   for (const name of listNames(join(dir, "reviews"))) {
+     const m = re.exec(name);
+     if (m) best = Math.max(best, Number(m[1]));
+   }
++  return best === 0 ? null : join(dir, "reviews", `pre-submit-${shot}-v${best}.json`);
++}
++
++/** 镜头最新的 pre-submit 审核文件；必须 verdict 为 pass，返回其哈希。 */
++function passedReviewHash(dir: string, shot: string): string {
+   const fail = new Error(`${shot} 还没有通过提交前审核`);
+-  if (best === 0) throw fail;
+-  const path = join(dir, "reviews", `pre-submit-${shot}-v${best}.json`);
++  const path = latestReviewPath(dir, shot);
++  if (path === null) throw fail;
+   const review = JSON.parse(readFileSync(path, "utf8")) as { verdict?: string };
+   if (review.verdict !== "pass") throw fail;
+   return sha256File(path);
+ }
+ 
+-/** spend.jsonl 各行 cny 之和（不四舍五入）；文件不存在为 0；坏行抛错。 */
+-function spentFromLog(dir: string): number {
++/** spend.jsonl 的全部行；文件不存在为 []；坏行（不是 JSON、cny 不是非负有限数）抛错。 */
++export function readSpendRows(dir: string): SpendRow[] {
+   let raw: string;
+   try {
+     raw = readFileSync(join(dir, "spend.jsonl"), "utf8");
+   } catch (err) {
+-    if ((err as NodeJS.ErrnoException).code === "ENOENT") return 0;
++    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+     throw err;
+   }
+-  let sum = 0;
++  const rows: SpendRow[] = [];
+   const lines = raw.split(/\r?\n/);
+   for (let i = 0; i < lines.length; i++) {
+     if (!lines[i].trim()) continue;
+     let row: { cny?: unknown } | null;
+     try {
+       row = JSON.parse(lines[i]);
+     } catch {
+       throw new Error(`spend.jsonl 第 ${i + 1} 行不是合法的 JSON`);
+     }
+     const cny = row?.cny;
+     if (typeof cny !== "number" || !Number.isFinite(cny) || cny < 0) {
+       throw new Error(`spend.jsonl 第 ${i + 1} 行的 cny 不合法：${JSON.stringify(cny)}`);
+     }
+-    sum += cny;
++    rows.push(row as SpendRow);
+   }
+-  return sum;
++  return rows;
++}
++
++/** spend.jsonl 各行 cny 之和（不四舍五入）；文件不存在为 0；坏行抛错。 */
++export function spentFromLog(dir: string): number {
++  return readSpendRows(dir).reduce((a, r) => a + r.cny, 0);
+ }
+ 
+ function nextQuoteId(dir: string): string {
+   let max = 0;
+   for (const name of listNames(join(dir, "quotes"))) {
+     const m = /^Q(\d+)\.json$/.exec(name);
+     if (m) max = Math.max(max, Number(m[1]));
+   }
+   return `Q${max + 1}`;
+ }
+diff --git a/scripts/seedance.ts b/scripts/seedance.ts
+new file mode 100644
+index 0000000..7e55398
+--- /dev/null
++++ b/scripts/seedance.ts
+@@ -0,0 +1,508 @@
++import { appendFileSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
++import { join, relative, resolve } from "node:path";
++import { assertFilmName, filmDir } from "./lib/paths.ts";
++import { readState, writeState } from "./lib/state.ts";
++import { latestVersionPath, nextVersionPath, writeNew } from "./lib/versioned.ts";
++import { sha256File } from "./lib/hash.ts";
++import { latestReviewPath, readPricing, readSpendRows, round1, spentFromLog, type Quote, type SpendRow } from "./quote.ts";
++import { readApproval } from "./approve.ts";
++import {
++  apiKey,
++  ArrearsError,
++  createTask,
++  downloadVideo,
++  GatewayError,
++  getTask,
++  MissingKeyError,
++  scrub,
++  type TaskStatus,
++} from "./lib/video-api.ts";
++
++const USAGE =
++  "用法：seedance.ts submit <片名> --quote Q<n>\n" +
++  "      seedance.ts poll <片名> [--json]\n" +
++  "      seedance.ts fetch <片名>\n" +
++  "      seedance.ts wait <片名> [--interval 30] [--timeout 3600]";
++const QUOTE_ID_RE = /^Q\d+$/;
++const SHOT_RE = /^[A-Za-z0-9_]{1,20}$/;
++const EPS = 1e-9;
++const LOCK = ".submit.lock";
++
++/** 提交前审核要和现在一致的三类文件（requirements.md 改了不拦：它是全片要求，不是这一镜的提交内容）。 */
++const SHOT_FILES = [
++  { base: "prompt", ext: "txt", label: "提示词" },
++  { base: "first", ext: "png", label: "首帧" },
++  { base: "last", ext: "png", label: "尾帧" },
++] as const;
++
++function fwd(p: string): string {
++  return p.replace(/\\/g, "/");
++}
++
++/** 审核记录的键是 fwd(resolve(路径))；Windows 上路径不分大小写。 */
++function normKey(p: string): string {
++  const f = fwd(resolve(p));
++  return process.platform === "win32" ? f.toLowerCase() : f;
++}
++
++function rel(dir: string, p: string): string {
++  return fwd(relative(dir, p));
++}
++
++/** 读 JSON；文件不存在返回 undefined，内容坏了返回 null。 */
++function readJson(path: string): unknown {
++  let raw: string;
++  try {
++    raw = readFileSync(path, "utf8");
++  } catch (err) {
++    if ((err as NodeJS.ErrnoException).code === "ENOENT") return undefined;
++    throw err;
++  }
++  try {
++    return JSON.parse(raw);
++  } catch {
++    return null;
++  }
++}
++
++function latestShotFile(dir: string, shot: string, base: string, ext: string): string | null {
++  return latestVersionPath(join(dir, "shots", shot), base, ext);
++}
++
++function isFiniteNum(x: unknown): x is number {
++  return typeof x === "number" && Number.isFinite(x);
++}
++
++/** 报价内容是否完整可用（不完整的报价一律不提交）。 */
++function validQuote(q: any, id: string): q is Quote {
++  return (
++    q && typeof q === "object" && q.id === id && typeof q.model === "string" && typeof q.modelId === "string" &&
++    isFiniteNum(q.totalCNY) && Array.isArray(q.shots) && q.shots.length > 0 &&
++    q.shots.every(
++      (s: any) =>
++        s && typeof s.shot === "string" && SHOT_RE.test(s.shot) && Number.isInteger(s.billable) && s.billable >= 4 &&
++        typeof s.reviewHash === "string",
++    ) &&
++    new Set(q.shots.map((s: any) => s.shot)).size === q.shots.length
++  );
++}
++
++/**
++ * 提交前的 7 道闸门，按顺序返回所有不满足的原因；空数组 = 通过。
++ * 1 报价存在且不超预算；2 模型支持首尾帧（且报价的模型、金额和现在的价格表一致）；
++ * 3 每镜最新提交前审核是"通过"；4 审核后没改过提示词/首帧/尾帧（且审核记录就是报价时那份）；
++ * 5 本人批准了这份报价、金额一致；6 按 spend.jsonl 现算不超预算；7 这份报价没提交过。
++ */
++export function checkGates(film: string, quoteId: string): string[] {
++  if (typeof quoteId !== "string" || !QUOTE_ID_RE.test(quoteId)) return [`报价号不合法：${quoteId}`];
++  const dir = filmDir(film);
++
++  // 1
++  const raw = readJson(join(dir, "quotes", `${quoteId}.json`));
++  if (raw === undefined) return [`报价 ${quoteId} 不存在`];
++  if (!validQuote(raw, quoteId)) return [`报价 ${quoteId} 内容不完整`];
++  const q = raw;
++  const g: string[][] = [[], [], [], [], [], [], [], []];
++  if (q.overBudget !== false) g[1].push(`报价 ${quoteId} 超预算，不能提交`);
++
++  // 2
++  const pricing = readPricing();
++  const price = Object.hasOwn(pricing.models, q.model) ? pricing.models[q.model] : undefined;
++  const seconds = q.shots.reduce((a, s) => a + s.billable, 0);
++  let rawTotal = q.totalCNY;
++  if (!price || !isFiniteNum(price.cnyPerSecond720p)) {
++    g[2].push(`价格表里没有模型 ${q.model}`);
++  } else {
++    if (price.firstLastFrame !== true) g[2].push(`模型 ${price.id} 不支持首尾帧`);
++    rawTotal = seconds * price.cnyPerSecond720p;
++    if (q.modelId !== price.id) g[2].push(`报价 ${quoteId} 的模型 ${q.modelId} 和价格表里的 ${price.id} 对不上，请重新报价`);
++    else if (round1(rawTotal) !== q.totalCNY) g[2].push(`报价 ${quoteId} 的金额和现在的单价对不上，请重新报价`);
++  }
++
++  // 3、4
++  let state: ReturnType<typeof readState> | null = null;
++  try {
++    state = readState(film);
++  } catch {
++    g[3].push("读不到 state.json");
++  }
++  for (const line of q.shots) {
++    const shot = line.shot;
++    if (state && !Object.hasOwn(state.shots, shot)) {
++      g[3].push(`没有这个镜头：${shot}`);
++      continue;
++    }
++    const rp = latestReviewPath(dir, shot);
++    const rec = rp ? (readJson(rp) as any) : undefined;
++    if (!rp || !rec || rec.kind !== "pre-submit" || rec.shot !== shot || rec.verdict !== "pass") {
++      g[3].push(`${shot} 的提交前审核不是"通过"`);
++      continue;
++    }
++    if (sha256File(rp) !== line.reviewHash) g[4].push(`${shot} 报价后又审核过，请重新报价`);
++    const recorded = new Map<string, unknown>();
++    if (rec.files && typeof rec.files === "object") {
++      for (const [k, v] of Object.entries(rec.files)) recorded.set(normKey(k), v);
++    }
++    for (const f of SHOT_FILES) {
++      const cur = latestShotFile(dir, shot, f.base, f.ext);
++      if (cur === null) {
++        g[4].push(`${shot} 缺少${f.label}：shots/${shot}/${f.base}-v*.${f.ext}`);
++        continue;
++      }
++      const h = recorded.get(normKey(cur));
++      if (typeof h !== "string" || h !== sha256File(cur)) g[4].push(`${shot} 审核后改过文件：${rel(dir, cur)}`);
++      else if (f.base === "prompt" && !readFileSync(cur, "utf8").trim()) g[4].push(`${shot} 的提示词是空的`);
++    }
++  }
++
++  // 5
++  let appr: ReturnType<typeof readApproval> = null;
++  try {
++    appr = readApproval(film, quoteId);
++  } catch {
++    appr = null;
++  }
++  if (!appr || appr.quote !== quoteId || !isFiniteNum(appr.totalCNY) || appr.totalCNY !== q.totalCNY) {
++    g[5].push(`报价 ${quoteId} 还没有本人批准`);
++  }
++
++  // 6、7
++  let rows: SpendRow[] | null = null;
++  try {
++    rows = readSpendRows(dir);
++  } catch (err) {
++    g[6].push((err as Error).message);
++  }
++  const budget = state?.settings?.budgetCNY;
++  if (rows) {
++    const spent = rows.reduce((a, r) => a + r.cny, 0);
++    if (!isFiniteNum(budget) || budget < 0) {
++      g[6].push(budget === null || budget === undefined ? "还没有设总预算" : `总预算不合法：${JSON.stringify(budget)}`);
++    } else if (!(spent + rawTotal <= budget + EPS)) {
++      g[6].push(`花费会超预算：已花 ¥${spent.toFixed(1)} + 本次 ¥${q.totalCNY.toFixed(1)} > 预算 ¥${budget.toFixed(1)}`);
++    }
++    if (rows.some((r) => r.quote === quoteId)) g[7].push(`报价 ${quoteId} 已经提交过`);
++  }
++  return g.flat();
++}
++
++function usage(): number {
++  console.error(USAGE);
++  return 2;
++}
++
++function needKey(): boolean {
++  try {
++    apiKey();
++    return true;
++  } catch (err) {
++    console.error((err as Error).message);
++    return false;
++  }
++}
++
++/** 追加一行 JSON；原文件末尾没有换行时先补一个。 */
++function appendJsonl(path: string, row: object): void {
++  let prefix = "";
++  try {
++    const cur = readFileSync(path, "utf8");
++    if (cur.length > 0 && !cur.endsWith("\n")) prefix = "\n";
++  } catch (err) {
++    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
++  }
++  appendFileSync(path, prefix + JSON.stringify(row) + "\n");
++}
++
++function updateShot(film: string, shot: string, patch: { status?: string; clip?: string }, spent?: number): void {
++  const st = readState(film);
++  if (Object.hasOwn(st.shots, shot)) Object.assign(st.shots[shot], patch);
++  if (spent !== undefined) st.spentCNY = spent;
++  writeState(st);
++}
++
++async function submit(args: string[]): Promise<number> {
++  const [film, ...rest] = args;
++  let quoteId: string | undefined;
++  for (let i = 0; i < rest.length; i++) {
++    if (rest[i] === "--quote" && i + 1 < rest.length) quoteId = rest[++i];
++    else return usage();
++  }
++  if (!film || !quoteId || !QUOTE_ID_RE.test(quoteId)) return usage();
++  try {
++    assertFilmName(film);
++  } catch (err) {
++    console.error((err as Error).message);
++    return 2;
++  }
++  if (!needKey()) return 1;
++  const dir = filmDir(film);
++
++  // 一次只允许一个提交：先占锁，再查闸门，查完到发完都在锁里
++  const lock = join(dir, LOCK);
++  try {
++    writeNew(lock, JSON.stringify({ pid: process.pid, quote: quoteId, at: new Date().toISOString() }));
++  } catch (err) {
++    const code = (err as NodeJS.ErrnoException).code;
++    if (code === "EEXIST") {
++      console.error(`另一个提交正在进行（films/${film}/${LOCK}）；确认没有在提交后删掉这个文件再试`);
++      return 1;
++    }
++    if (code === "ENOENT") {
++      console.error(`没有这部片子：${film}`);
++      return 1;
++    }
++    throw err;
++  }
++  try {
++    const reasons = checkGates(film, quoteId);
++    if (reasons.length > 0) {
++      for (const r of reasons) console.error(r);
++      return 1;
++    }
++    const q = readJson(join(dir, "quotes", `${quoteId}.json`)) as Quote;
++    const price = readPricing().models[q.model];
++    const aspect = readState(film).settings.aspect;
++    const spendPath = join(dir, "spend.jsonl");
++    let n = 0;
++    let total = 0;
++    for (const line of q.shots) {
++      const shot = line.shot;
++      const cny = line.billable * price.cnyPerSecond720p;
++      const row = { at: "", quote: quoteId, shot, task: null as string | null, model: price.id, billable: line.billable, cny };
++      try {
++        const prompt = readFileSync(latestShotFile(dir, shot, "prompt", "txt")!, "utf8").trim();
++        const { id } = await createTask({
++          model: price.id,
++          prompt,
++          firstFrame: latestShotFile(dir, shot, "first", "png")!,
++          lastFrame: latestShotFile(dir, shot, "last", "png")!,
++          seconds: line.billable,
++          resolution: "720p",
++          aspectRatio: aspect,
++        });
++        appendJsonl(spendPath, { ...row, at: new Date().toISOString(), task: id });
++        updateShot(film, shot, { status: "generating" }, spentFromLog(dir));
++        n++;
++        total += cny;
++        console.log(`已提交 ${shot}：${id}（${line.billable} 秒，约 ¥${cny.toFixed(2)}）`);
++      } catch (err) {
++        if (err instanceof ArrearsError) {
++          console.error(`网关说余额或额度不足：${scrub(err.message)}`);
++          console.error(`欠费：已提交 ${n} 镜，其余未提交`);
++          return 4;
++        }
++        if (err instanceof GatewayError && err.uncertain) {
++          // 不知道建没建成：按可能已扣费记账（预算照算、这份报价不能再提交），不重发
++          appendJsonl(spendPath, { ...row, at: new Date().toISOString(), uncertain: true });
++          updateShot(film, shot, {}, spentFromLog(dir));
++          console.error(
++            `${shot} 提交结果不明（${scrub(err.message)}）：可能已经建了任务并扣费，已按 ¥${cny.toFixed(2)} 记入 spend.jsonl。` +
++              "请到网关的任务日志核对，不要直接重发。",
++          );
++          console.error(`已提交 ${n} 镜，其余未提交`);
++          return 1;
++        }
++        if (err instanceof MissingKeyError) {
++          console.error(err.message);
++          return 1;
++        }
++        const msg = err instanceof GatewayError ? `网关拒绝了（${scrub(err.message)}），没有建任务` : scrub((err as Error).message);
++        console.error(`${shot} 提交失败：${msg}`);
++        console.error(`已提交 ${n} 镜，其余未提交`);
++        return 1;
++      }
++    }
++    console.log(`已提交 ${n} 镜，约 ¥${round1(total).toFixed(1)}（估算，以账单为准）；用 wait 等出片`);
++    return 0;
++  } finally {
++    try {
++      unlinkSync(lock);
++    } catch {
++      /* 锁已不在 */
++    }
++  }
++}
++
++interface Pending {
++  shot: string;
++  task: string;
++}
++
++interface PollResult extends Pending {
++  status: TaskStatus | "unknown";
++  videoUrl?: string;
++  error?: string;
++}
++
++/** fetched.jsonl：下载完或失败结束的任务（之后不再查询）。 */
++function doneTasks(dir: string): Set<string> {
++  let raw: string;
++  try {
++    raw = readFileSync(join(dir, "fetched.jsonl"), "utf8");
++  } catch (err) {
++    if ((err as NodeJS.ErrnoException).code === "ENOENT") return new Set();
++    throw err;
++  }
++  const done = new Set<string>();
++  const lines = raw.split(/\r?\n/);
++  for (let i = 0; i < lines.length; i++) {
++    if (!lines[i].trim()) continue;
++    let row: any;
++    try {
++      row = JSON.parse(lines[i]);
++    } catch {
++      throw new Error(`fetched.jsonl 第 ${i + 1} 行不是合法的 JSON`);
++    }
++    if (typeof row?.task === "string") done.add(row.task);
++  }
++  return done;
++}
++
++/** spend.jsonl 里有任务编号、还没下载或失败结束的任务（按提交顺序，去重）。 */
++function pendingTasks(dir: string): Pending[] {
++  const done = doneTasks(dir);
++  const out: Pending[] = [];
++  const seen = new Set<string>();
++  for (const r of readSpendRows(dir)) {
++    if (typeof r.task !== "string" || !r.task || typeof r.shot !== "string") continue;
++    if (done.has(r.task) || seen.has(r.task)) continue;
++    seen.add(r.task);
++    out.push({ shot: r.shot, task: r.task });
++  }
++  return out;
++}
++
++async function pollOnce(dir: string): Promise<PollResult[]> {
++  const out: PollResult[] = [];
++  for (const p of pendingTasks(dir)) {
++    try {
++      out.push({ ...p, ...(await getTask(p.task)) });
++    } catch (err) {
++      if (err instanceof MissingKeyError) throw err;
++      out.push({ ...p, status: "unknown", error: scrub((err as Error).message) });
++    }
++  }
++  return out;
++}
++
++function unfinished(results: PollResult[]): boolean {
++  return results.some((r) => r.status === "queued" || r.status === "running" || r.status === "unknown");
++}
++
++const LABEL: Record<PollResult["status"], string> = {
++  queued: "排队中",
++  running: "生成中",
++  succeeded: "已完成",
++  failed: "失败",
++  unknown: "查询失败",
++};
++
++function filmArg(film: string | undefined): string | null {
++  if (!film) return null;
++  try {
++    assertFilmName(film);
++    return film;
++  } catch (err) {
++    console.error((err as Error).message);
++    return null;
++  }
++}
++
++async function poll(args: string[]): Promise<number> {
++  const [filmRaw, ...rest] = args;
++  let json = false;
++  for (const a of rest) {
++    if (a === "--json") json = true;
++    else return usage();
++  }
++  const film = filmArg(filmRaw);
++  if (!film) return usage();
++  if (!needKey()) return 1;
++  const results = await pollOnce(filmDir(film));
++  if (json) console.log(JSON.stringify(results));
++  else if (results.length === 0) console.log("没有待查询的任务");
++  else {
++    for (const r of results) console.log(`${r.shot} ${r.task}：${LABEL[r.status]}${r.error ? `：${r.error}` : ""}`);
++  }
++  return unfinished(results) ? 10 : 0;
++}
++
++/** 下载成功的、记下失败的；还在跑的跳过。返回 0，有下载出错返回 1。 */
++async function fetchAll(film: string): Promise<number> {
++  const dir = filmDir(film);
++  const fetchedPath = join(dir, "fetched.jsonl");
++  let code = 0;
++  for (const r of await pollOnce(dir)) {
++    if (r.status === "succeeded") {
++      const shotDir = join(dir, "shots", r.shot);
++      mkdirSync(shotDir, { recursive: true });
++      const dest = nextVersionPath(shotDir, "clip", "mp4");
++      try {
++        await downloadVideo(r.task, r.videoUrl, dest);
++      } catch (err) {
++        console.error(`${r.shot} 下载失败：${scrub((err as Error).message)}`);
++        code = 1;
++        continue;
++      }
++      const clip = rel(dir, dest);
++      appendJsonl(fetchedPath, { at: new Date().toISOString(), task: r.task, shot: r.shot, status: "downloaded", clip });
++      updateShot(film, r.shot, { status: "generated", clip });
++      console.log(`${r.shot} 已下载：${clip}`);
++    } else if (r.status === "failed") {
++      const why = r.error || "失败";
++      appendJsonl(fetchedPath, { at: new Date().toISOString(), task: r.task, shot: r.shot, status: "failed", error: why });
++      updateShot(film, r.shot, { status: "failed" });
++      console.error(`${r.shot} 生成失败：${why}`);
++    } else {
++      console.log(`${r.shot} ${r.task}：${LABEL[r.status]}${r.error ? `：${r.error}` : ""}`);
++    }
++  }
++  return code;
++}
++
++async function fetchCmd(args: string[]): Promise<number> {
++  const [filmRaw, ...rest] = args;
++  if (rest.length > 0) return usage();
++  const film = filmArg(filmRaw);
++  if (!film) return usage();
++  if (!needKey()) return 1;
++  return fetchAll(film);
++}
++
++async function wait(args: string[]): Promise<number> {
++  const [filmRaw, ...rest] = args;
++  let interval = 30;
++  let timeout = 3600;
++  for (let i = 0; i < rest.length; i++) {
++    const v = Number(rest[i + 1]);
++    if (rest[i] === "--interval" && i + 1 < rest.length && Number.isFinite(v) && v >= 0) interval = v, i++;
++    else if (rest[i] === "--timeout" && i + 1 < rest.length && Number.isFinite(v) && v > 0) timeout = v, i++;
++    else return usage();
++  }
++  const film = filmArg(filmRaw);
++  if (!film) return usage();
++  if (!needKey()) return 1;
++  const dir = filmDir(film);
++  const deadline = Date.now() + timeout * 1000;
++  for (;;) {
++    const results = await pollOnce(dir);
++    if (!unfinished(results)) return fetchAll(film);
++    const left = deadline - Date.now();
++    if (left <= 0) {
++      console.log("还没出完，稍后再 wait");
++      return 6;
++    }
++    await new Promise((ok) => setTimeout(ok, Math.min(interval * 1000, left)));
++  }
++}
++
++export async function main(argv: string[]): Promise<number> {
++  const [cmd, ...args] = argv;
++  if (cmd === "submit") return submit(args);
++  if (cmd === "poll") return poll(args);
++  if (cmd === "fetch") return fetchCmd(args);
++  if (cmd === "wait") return wait(args);
++  return usage();
++}
++
++if (import.meta.main) process.exit(await main(process.argv.slice(2)));
+diff --git a/tests/approve.test.ts b/tests/approve.test.ts
+index b8aed40..cbac222 100644
+--- a/tests/approve.test.ts
++++ b/tests/approve.test.ts
+@@ -156,10 +156,29 @@ test("参数不对：退出 2（报价号格式、缺 --said、多余参数、
+     }
+     assert.deepEqual(approvals(dir), []);
+   });
+ });
+ 
+ test("readApproval：报价号不合法时抛错", async () => {
+   await withFilm(() => {
+     assert.throws(() => readApproval(FILM, "../Q3"), /报价号不合法/);
+   });
+ });
++
++test("原话里否定了批准：退出 1，不写文件（不批准、别批准、先不要批准、没批准、未批准、勿批准）", async () => {
++  await withFilm(async (dir, out) => {
++    writeQuote(dir, "Q3");
++    for (const said of ["不批准 Q3", "别批准 Q3", "先不要批准 Q3", "没批准 Q3", "还未批准 Q3", "勿批准 Q3", "不，别急着批准 Q3"]) {
++      assert.equal(await main([FILM, "Q3", "--said", said]), 1, said);
++      assert.equal(out.at(-1), '本人原话里没有"批准 Q3"');
++    }
++    assert.deepEqual(approvals(dir), []);
++  });
++});
++
++test("卡片选项原文“批准 Q3（¥1.5）”可以批准", async () => {
++  await withFilm(async (dir) => {
++    writeQuote(dir, "Q3");
++    assert.equal(await main([FILM, "Q3", "--said", "批准 Q3（¥1.5）"]), 0);
++    assert.deepEqual(approvals(dir), ["Q3.json"]);
++  });
++});
+diff --git a/tests/fakes/video-server.ts b/tests/fakes/video-server.ts
+new file mode 100644
+index 0000000..21ed5b2
+--- /dev/null
++++ b/tests/fakes/video-server.ts
+@@ -0,0 +1,168 @@
++// 假视频网关：模仿 new-api（DragonAPI）的 POST /v1/videos、GET /v1/videos/{id}、GET /v1/videos/{id}/content。
++// 测试里 import startVideoServer；也能单独运行（Task 9 用）：
++//   node tests/fakes/video-server.ts --port 3399 --video clip.mp4 [--succeed-after 2] [--create ok|arrears|reject] [--result ok|fail]
++import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
++import { readFileSync } from "node:fs";
++import type { AddressInfo } from "node:net";
++
++/** 第 n 个创建请求的反应：ok 建任务；arrears 返回额度不足（new-api 的 403 insufficient_user_quota）；
++ *  reject 返回 400（不建任务）；echo-key 返回 400 且错误正文里带上收到的 Authorization（测试脱敏）；
++ *  crash 直接断开连接（结果不明）。 */
++export type CreateMode = "ok" | "arrears" | "reject" | "echo-key" | "crash";
++
++export interface RecordedRequest {
++  method: string;
++  path: string;
++  authorization: string | null;
++  body: unknown;
++}
++
++export interface VideoServerOptions {
++  /** 按顺序消费；用完后一律 ok。 */
++  creates?: CreateMode[];
++  /** 每个任务第几次查询变成 completed（默认 1）。 */
++  succeedAfter?: number;
++  /** 任务的最终结果（默认 ok）。 */
++  result?: "ok" | "fail";
++  /** 下载返回的视频内容。 */
++  video?: Uint8Array;
++  port?: number;
++}
++
++export interface VideoServer {
++  url: string;
++  requests: RecordedRequest[];
++  /** 只看 POST /v1/videos。 */
++  creates(): RecordedRequest[];
++  options: VideoServerOptions;
++  close(): Promise<void>;
++}
++
++const DATA_URL = /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/]+={0,2}$/;
++
++function send(res: ServerResponse, status: number, body: unknown): void {
++  res.writeHead(status, { "content-type": "application/json" });
++  res.end(JSON.stringify(body));
++}
++
++/** 按 DragonAPI 文档检查首尾帧请求格式；不对就 400（真网关也是 400、不建任务）。 */
++function checkCreate(body: any): string | null {
++  if (!body || typeof body !== "object") return "JSON object required";
++  if (typeof body.model !== "string" || !body.model) return "model is required";
++  if (typeof body.prompt !== "string" || !body.prompt) return "prompt is required";
++  if (!Number.isInteger(body.seconds) || body.seconds < 4) return "seconds must be an integer >= 4";
++  if (body.resolution !== "720p") return "resolution must be 720p";
++  if (body.task_mode !== "first_last_frame") return "task_mode must be first_last_frame";
++  const c = body.content;
++  if (!Array.isArray(c) || c.length !== 2) return "content must have 2 images";
++  const roles = ["first_frame", "last_frame"];
++  for (let i = 0; i < 2; i++) {
++    if (c[i]?.type !== "image_url" || c[i]?.role !== roles[i]) return `content[${i}] must be image_url ${roles[i]}`;
++    if (typeof c[i]?.url !== "string" || !DATA_URL.test(c[i].url)) return `content[${i}].url must be a data URL`;
++  }
++  return null;
++}
++
++export async function startVideoServer(options: VideoServerOptions = {}): Promise<VideoServer> {
++  const requests: RecordedRequest[] = [];
++  const tasks = new Map<string, { queries: number }>();
++  let createCount = 0;
++  let seq = 0;
++  const video = options.video ?? new TextEncoder().encode("FAKE-MP4-DATA");
++
++  const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
++    const chunks: Buffer[] = [];
++    for await (const ch of req) chunks.push(ch as Buffer);
++    const raw = Buffer.concat(chunks).toString("utf8");
++    let body: unknown = null;
++    if (raw) {
++      try {
++        body = JSON.parse(raw);
++      } catch {
++        body = raw;
++      }
++    }
++    const path = (req.url ?? "/").split("?")[0];
++    const auth = req.headers.authorization ?? null;
++    requests.push({ method: req.method ?? "", path, authorization: auth, body });
++
++    if (!auth || !/^Bearer \S+$/.test(auth)) return send(res, 401, { error: { message: "invalid token", code: "invalid_api_key" } });
++
++    if (req.method === "POST" && path === "/v1/videos") {
++      const mode = options.creates?.[createCount] ?? "ok";
++      createCount++;
++      if (mode === "crash") {
++        req.socket.destroy();
++        return;
++      }
++      if (mode === "arrears") {
++        return send(res, 403, {
++          code: "insufficient_user_quota",
++          message: "用户额度不足，剩余额度：¤0.10，需要预扣：¤2.25",
++          data: null,
++        });
++      }
++      if (mode === "echo-key") return send(res, 400, { error: { message: `bad request from ${auth}`, code: "invalid_request" } });
++      const problem = mode === "reject" ? "seconds out of range" : checkCreate(body);
++      if (problem) return send(res, 400, { error: { message: problem, code: "invalid_request" } });
++      const id = `task_fake${String(++seq).padStart(4, "0")}`;
++      tasks.set(id, { queries: 0 });
++      return send(res, 200, { id, object: "video", model: (body as any).model, status: "queued", progress: 0 });
++    }
++
++    const m = /^\/v1\/videos\/([^/]+)(\/content)?$/.exec(path);
++    if (req.method === "GET" && m) {
++      const id = decodeURIComponent(m[1]);
++      const t = tasks.get(id);
++      if (!t) return send(res, 404, { error: { message: "task not found", code: "not_found" } });
++      const done = t.queries >= (options.succeedAfter ?? 1);
++      if (m[2]) {
++        if (!done || options.result === "fail") return send(res, 400, { error: { message: "video not ready", code: "not_ready" } });
++        res.writeHead(200, { "content-type": "video/mp4" });
++        res.end(video);
++        return;
++      }
++      t.queries++;
++      const finished = t.queries >= (options.succeedAfter ?? 1);
++      if (!finished) return send(res, 200, { id, object: "video", status: t.queries === 1 ? "queued" : "in_progress", progress: 50 });
++      if (options.result === "fail") {
++        return send(res, 200, { id, object: "video", status: "failed", progress: 100, error: { message: "内容审核未通过", code: "content_policy" } });
++      }
++      return send(res, 200, { id, object: "video", status: "completed", progress: 100 });
++    }
++    send(res, 404, { error: { message: "not found" } });
++  });
++
++  await new Promise<void>((ok) => server.listen(options.port ?? 0, "127.0.0.1", ok));
++  const port = (server.address() as AddressInfo).port;
++  return {
++    url: `http://127.0.0.1:${port}`,
++    requests,
++    creates: () => requests.filter((r) => r.method === "POST" && r.path === "/v1/videos"),
++    options,
++    close: () =>
++      new Promise<void>((ok) => {
++        server.closeAllConnections();
++        server.close(() => ok());
++      }),
++  };
++}
++
++if (import.meta.main) {
++  const args = process.argv.slice(2);
++  const opts: VideoServerOptions = { port: 3399 };
++  for (let i = 0; i < args.length; i++) {
++    const v = args[i + 1];
++    if (args[i] === "--port") opts.port = Number(v), i++;
++    else if (args[i] === "--video") opts.video = readFileSync(v), i++;
++    else if (args[i] === "--succeed-after") opts.succeedAfter = Number(v), i++;
++    else if (args[i] === "--create") opts.creates = Array(1000).fill(v as CreateMode), i++;
++    else if (args[i] === "--result") opts.result = v as "ok" | "fail", i++;
++    else {
++      console.error("用法：video-server.ts --port <n> --video <mp4> [--succeed-after n] [--create ok|arrears|reject] [--result ok|fail]");
++      process.exit(2);
++    }
++  }
++  const s = await startVideoServer(opts);
++  console.log(`假视频网关已启动：${s.url}`);
++}
+diff --git a/tests/quote.test.ts b/tests/quote.test.ts
+index a2cc943..7d2d8cf 100644
+--- a/tests/quote.test.ts
++++ b/tests/quote.test.ts
+@@ -54,86 +54,89 @@ async function withFilm(
+ 
+ function review(dir: string, shot: string, n: number, verdict: "pass" | "fail"): string {
+   const path = join(dir, "reviews", `pre-submit-${shot}-v${n}.json`);
+   writeFileSync(
+     path,
+     JSON.stringify({ kind: "pre-submit", film: FILM, shot, verdict, at: new Date().toISOString(), files: {} }),
+   );
+   return path;
+ }
+ 
+-test("billableSeconds：向上取整，余量不足 0.5 秒再加 1 秒", () => {
++test("billableSeconds：向上取整，余量不足 0.5 秒再加 1 秒；最少 4 秒（网关 Seedance 最短 4 秒）", () => {
+   assert.equal(billableSeconds(4), 5);
+   assert.equal(billableSeconds(4.4), 5);
+   assert.equal(billableSeconds(4.5), 6);
+   assert.equal(billableSeconds(4.6), 6);
+-  assert.equal(billableSeconds(0.3), 2);
++  assert.equal(billableSeconds(0.3), 4);
++  assert.equal(billableSeconds(2.6), 4);
++  assert.equal(billableSeconds(3.2), 4);
++  assert.equal(billableSeconds(3.5), 5);
+ });
+ 
+-test("两镜各 4.4 秒：mini 合计 5.0，2.5 合计 15.0；reviewHash 是最新审核文件的哈希", async () => {
++test("两镜各 4.4 秒：mini 合计 1.5，2.5 合计 5.5；reviewHash 是最新审核文件的哈希", async () => {
+   await withFilm({ budget: 100, shots: { S01: 4.4, S02: 4.4 } }, (dir) => {
+     review(dir, "S01", 1, "pass");
+     const latest = review(dir, "S01", 2, "pass");
+     review(dir, "S02", 1, "pass");
+     const q = buildQuote(FILM, ["S01", "S02"]);
+     assert.equal(q.model, "mini");
+-    assert.equal(q.modelId, "doubao-seedance-2-0-mini-260615");
+-    assert.equal(q.totalCNY, 5.0);
++    assert.equal(q.modelId, "seedance-2.0-mini");
++    assert.equal(q.totalCNY, 1.5);
+     assert.equal(q.overBudget, false);
+     assert.deepEqual(q.shots.map((s) => [s.shot, s.seconds, s.billable]), [["S01", 4.4, 5], ["S02", 4.4, 5]]);
+     assert.equal(q.shots[0].reviewHash, sha256File(latest));
+     const q25 = buildQuote(FILM, ["S01", "S02"], "2.5");
+-    assert.equal(q25.modelId, "doubao-seedance-2-5-260628");
+-    assert.equal(q25.totalCNY, 15.0);
++    assert.equal(q25.modelId, "seedance-2.5");
++    assert.equal(q25.totalCNY, 5.5);
+   });
+ });
+ 
+-test("预算 10、已花 6、报价 5：overBudget，打印以超预算开头，退出码 2", async () => {
+-  await withFilm({ budget: 10, shots: { S01: 4.4, S02: 4.4 }, spent: [2.5, 3.5] }, async (dir, out) => {
++test("预算 7、已花 6、报价 1.5：overBudget，打印以超预算开头，退出码 2", async () => {
++  await withFilm({ budget: 7, shots: { S01: 4.4, S02: 4.4 }, spent: [2.5, 3.5] }, async (dir, out) => {
+     review(dir, "S01", 1, "pass");
+     review(dir, "S02", 1, "pass");
+     const q = buildQuote(FILM, ["S01", "S02"]);
+     assert.equal(q.spentCNY, 6);
+-    assert.equal(q.budgetCNY, 10);
++    assert.equal(q.budgetCNY, 7);
+     assert.equal(q.overBudget, true);
+     const code = await main([FILM, "--shots", "S01,S02"]);
+     assert.equal(code, 2);
+     assert.match(out.at(-1)!, /^超预算/);
+     const saved = JSON.parse(readFileSync(join(dir, "quotes", "Q1.json"), "utf8"));
+     assert.equal(saved.overBudget, true);
+   });
+ });
+ 
+ test("镜头没有审核、最新审核不通过时报错", async () => {
+   await withFilm({ budget: 100, shots: { S01: 4, S02: 4 } }, (dir) => {
+     review(dir, "S02", 1, "pass");
+     assert.throws(() => buildQuote(FILM, ["S01", "S02"]), /S01 还没有通过提交前审核/);
+     review(dir, "S02", 2, "fail");
+     assert.throws(() => buildQuote(FILM, ["S02"]), /S02 还没有通过提交前审核/);
+     // v10 比 v9 新（数字比较，不是字符串比较）
+     review(dir, "S01", 9, "fail");
+     review(dir, "S01", 10, "pass");
+-    assert.equal(buildQuote(FILM, ["S01"]).totalCNY, 2.5);
++    assert.equal(buildQuote(FILM, ["S01"]).totalCNY, 0.8);
+   });
+ });
+ 
+ test("连续两次报价得到 Q1、Q2，打印报价句子", async () => {
+   await withFilm({ budget: 100, shots: { S01: 4.4, S02: 4.4 }, spent: [1] }, async (dir, out) => {
+     review(dir, "S01", 1, "pass");
+     review(dir, "S02", 1, "pass");
+     assert.equal(await main([FILM, "--shots", "S01,S02"]), 0);
+     assert.equal(
+       out.at(-1),
+-      "报价 Q1：2 镜 10 秒 mini 约 ¥5.0（估算，以账单为准）；已花 ¥1.0，预算余 ¥99.0",
++      "报价 Q1：2 镜 10 秒 mini 约 ¥1.5（估算，以账单为准）；已花 ¥1.0，预算余 ¥99.0",
+     );
+     assert.equal(await main([FILM, "--shots", "S01", "--model", "2.5"]), 0);
+-    assert.match(out.at(-1)!, /^报价 Q2：1 镜 5 秒 2\.5 约 ¥7\.5/);
++    assert.match(out.at(-1)!, /^报价 Q2：1 镜 5 秒 2\.5 约 ¥2\.8/);
+     assert.deepEqual(readdirSync(join(dir, "quotes")).sort(), ["Q1.json", "Q2.json"]);
+     const q2 = JSON.parse(readFileSync(join(dir, "quotes", "Q2.json"), "utf8"));
+     assert.equal(q2.id, "Q2");
+     assert.equal(q2.film, FILM);
+     assert.equal(q2.model, "2.5");
+   });
+ });
+ 
+ test("没设总预算、未知镜头、缺参数时退出码 2 且不写报价", async () => {
+   await withFilm({ budget: null, shots: { S01: 4 } }, async (dir, out) => {
+@@ -186,22 +189,22 @@ test("镜头秒数缺失或不是数：报错、退出 2、不写报价", async
+     const st = JSON.parse(readFileSync(sp, "utf8"));
+     delete st.shots.S01.seconds;
+     writeFileSync(sp, JSON.stringify(st));
+     assert.throws(() => buildQuote(FILM, ["S01"]), /S01 的秒数不合法/);
+     assert.equal(await main([FILM, "--shots", "S01"]), 2);
+     assert.match(out.at(-1)!, /S01 的秒数不合法/);
+     assert.deepEqual(readdirSync(join(dir, "quotes")), []);
+   });
+ });
+ 
+-test("预算比较用未四舍五入的已花：已花 6.04 + 报价 5.0 > 预算 11", async () => {
+-  await withFilm({ budget: 11, shots: { S01: 4.4, S02: 4.4 }, spent: [3, 3.04] }, async (dir, out) => {
++test("预算比较用未四舍五入的已花：已花 6.04 + 报价 1.5 > 预算 7.5", async () => {
++  await withFilm({ budget: 7.5, shots: { S01: 4.4, S02: 4.4 }, spent: [3, 3.04] }, async (dir, out) => {
+     review(dir, "S01", 1, "pass");
+     review(dir, "S02", 1, "pass");
+     const q = buildQuote(FILM, ["S01", "S02"]);
+-    assert.equal(q.totalCNY, 5.0);
++    assert.equal(q.totalCNY, 1.5);
+     assert.equal(q.spentCNY, 6.0);
+     assert.equal(q.overBudget, true);
+     assert.equal(await main([FILM, "--shots", "S01,S02"]), 2);
+     assert.match(out.at(-1)!, /^超预算/);
+   });
+ });
+diff --git a/tests/seedance.test.ts b/tests/seedance.test.ts
+new file mode 100644
+index 0000000..1e2b9d7
+--- /dev/null
++++ b/tests/seedance.test.ts
+@@ -0,0 +1,440 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { dirname, join, resolve } from "node:path";
++import { checkGates, main } from "../scripts/seedance.ts";
++import { main as quote } from "../scripts/quote.ts";
++import { main as approve } from "../scripts/approve.ts";
++import { sha256File } from "../scripts/lib/hash.ts";
++import { readState, type FilmState } from "../scripts/lib/state.ts";
++import { startVideoServer, type VideoServer, type VideoServerOptions } from "./fakes/video-server.ts";
++
++const FILM = "提交片";
++const KEY = "sk-test-SECRET-9f8e7d6c5b4a";
++const PNG = (tag: string) => new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, ...new TextEncoder().encode(tag)]);
++
++function fwd(p: string): string {
++  return p.replace(/\\/g, "/");
++}
++
++interface Ctx {
++  dir: string;
++  out: string[];
++  gw: VideoServer;
++}
++
++/** 临时 FILM_ROOT + 一部素材齐全、审核通过的片子 + 假网关 + 环境变量 + 捕获输出。 */
++async function withFilm(
++  opts: { shots?: string[]; gw?: VideoServerOptions },
++  fn: (c: Ctx) => Promise<void>,
++): Promise<void> {
++  const root = mkdtempSync(join(tmpdir(), "film-seedance-"));
++  const saved = { FILM_ROOT: process.env.FILM_ROOT, SEEDANCE_BASE_URL: process.env.SEEDANCE_BASE_URL, SEEDANCE_API_KEY: process.env.SEEDANCE_API_KEY };
++  const out: string[] = [];
++  const log = console.log;
++  const err = console.error;
++  const gw = await startVideoServer(opts.gw ?? {});
++  console.log = (...a: unknown[]) => void out.push(a.join(" "));
++  console.error = (...a: unknown[]) => void out.push(a.join(" "));
++  try {
++    process.env.FILM_ROOT = root;
++    process.env.SEEDANCE_BASE_URL = gw.url;
++    process.env.SEEDANCE_API_KEY = KEY;
++    const dir = join(root, "films", FILM);
++    const shots = opts.shots ?? ["S01", "S02"];
++    mkdirSync(join(dir, "reviews"), { recursive: true });
++    mkdirSync(join(dir, "quotes"), { recursive: true });
++    const state: FilmState = {
++      film: FILM,
++      stage: "generate",
++      settings: { seconds: 10, aspect: "16:9", budgetCNY: 100, music: null, subtitles: false, model: "mini" },
++      gates: {},
++      shots: Object.fromEntries(shots.map((s) => [s, { seconds: 4.4, status: "ready", clip: null }])),
++      spentCNY: 0,
++    };
++    writeFileSync(join(dir, "state.json"), JSON.stringify(state, null, 2));
++    writeFileSync(join(dir, "requirements.md"), "本人要求");
++    for (const s of shots) {
++      put(dir, `shots/${s}/prompt-v1.txt`, `${s} 的七段式提示词`);
++      put(dir, `shots/${s}/first-v1.png`, PNG(`${s}-first`));
++      put(dir, `shots/${s}/last-v1.png`, PNG(`${s}-last`));
++      review(dir, s, 1, "pass");
++    }
++    await fn({ dir, out, gw });
++  } finally {
++    console.log = log;
++    console.error = err;
++    await gw.close();
++    for (const [k, v] of Object.entries(saved)) {
++      if (v === undefined) delete process.env[k];
++      else process.env[k] = v;
++    }
++    rmSync(root, { recursive: true, force: true });
++  }
++}
++
++function put(dir: string, rel: string, data: string | Uint8Array): string {
++  const p = join(dir, ...rel.split("/"));
++  mkdirSync(dirname(p), { recursive: true });
++  writeFileSync(p, data);
++  return p;
++}
++
++/** 按 review.ts 的格式写一份 pre-submit 审核记录：当前最新的提示词、首帧、尾帧 + requirements.md。 */
++function review(dir: string, shot: string, n: number, verdict: "pass" | "fail"): void {
++  const files: Record<string, string> = {};
++  const latest = (base: string, ext: string) => {
++    const names = readdirSync(join(dir, "shots", shot)).filter((x) => new RegExp(`^${base}-v\\d+\\.${ext}$`).test(x));
++    names.sort((a, b) => Number(/v(\d+)/.exec(b)![1]) - Number(/v(\d+)/.exec(a)![1]));
++    return join(dir, "shots", shot, names[0]);
++  };
++  for (const p of [latest("prompt", "txt"), latest("first", "png"), latest("last", "png"), join(dir, "requirements.md")]) {
++    files[fwd(resolve(p))] = sha256File(p);
++  }
++  writeFileSync(
++    join(dir, "reviews", `pre-submit-${shot}-v${n}.json`),
++    JSON.stringify({ kind: "pre-submit", film: FILM, shot, verdict, at: new Date().toISOString(), files }, null, 2),
++  );
++}
++
++/** 报价 + 批准，返回报价号。 */
++async function quoteAndApprove(shots: string, model?: "mini" | "2.5"): Promise<string> {
++  const args = [FILM, "--shots", shots, ...(model ? ["--model", model] : [])];
++  assert.equal(await quote(args), 0);
++  const ids = readdirSync(join(process.env.FILM_ROOT!, "films", FILM, "quotes")).map((n) => Number(/^Q(\d+)/.exec(n)![1]));
++  const id = `Q${Math.max(...ids)}`;
++  assert.equal(await approve([FILM, id, "--said", `批准 ${id}`]), 0);
++  return id;
++}
++
++function spendLines(dir: string): any[] {
++  if (!existsSync(join(dir, "spend.jsonl"))) return [];
++  return readFileSync(join(dir, "spend.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
++}
++
++function noKey(c: Ctx): void {
++  assert.ok(!c.out.join("\n").includes(KEY), "输出里出现了 Key");
++  assert.ok(!c.out.join("\n").includes("SECRET"), "输出里出现了 Key 片段");
++}
++
++// ---------- checkGates ----------
++
++test("checkGates：全部满足时返回 []", async () => {
++  await withFilm({}, async () => {
++    const id = await quoteAndApprove("S01,S02");
++    assert.deepEqual(checkGates(FILM, id), []);
++  });
++});
++
++test("闸门 1：报价不存在 / 报价超预算", async () => {
++  await withFilm({}, async (c) => {
++    assert.deepEqual(checkGates(FILM, "Q9"), ["报价 Q9 不存在"]);
++    const id = await quoteAndApprove("S01,S02");
++    const p = join(c.dir, "quotes", `${id}.json`);
++    const q = JSON.parse(readFileSync(p, "utf8"));
++    q.overBudget = true;
++    writeFileSync(p, JSON.stringify(q));
++    assert.deepEqual(checkGates(FILM, id), [`报价 ${id} 超预算，不能提交`]);
++  });
++});
++
++test("闸门 2：模型不支持首尾帧（seedance-2.5）", async () => {
++  await withFilm({}, async () => {
++    const id = await quoteAndApprove("S01,S02", "2.5");
++    assert.deepEqual(checkGates(FILM, id), ["模型 seedance-2.5 不支持首尾帧"]);
++  });
++});
++
++test("闸门 3：最新提交前审核不是通过", async () => {
++  await withFilm({}, async (c) => {
++    const id = await quoteAndApprove("S01,S02");
++    review(c.dir, "S01", 2, "fail");
++    assert.deepEqual(checkGates(FILM, id), ['S01 的提交前审核不是"通过"']);
++  });
++});
++
++test("rejects files changed after review：改 prompt-v1.txt、新增 prompt-v2.txt 都被拒；改 requirements.md 不拦", async () => {
++  await withFilm({}, async (c) => {
++    const id = await quoteAndApprove("S01,S02");
++    writeFileSync(join(c.dir, "requirements.md"), "本人要求（补充）");
++    assert.deepEqual(checkGates(FILM, id), []);
++    appendFileSync(join(c.dir, "shots", "S01", "prompt-v1.txt"), "字");
++    assert.deepEqual(checkGates(FILM, id), ["S01 审核后改过文件：shots/S01/prompt-v1.txt"]);
++  });
++  await withFilm({}, async (c) => {
++    const id = await quoteAndApprove("S01,S02");
++    put(c.dir, "shots/S02/prompt-v2.txt", "新提示词");
++    assert.deepEqual(checkGates(FILM, id), ["S02 审核后改过文件：shots/S02/prompt-v2.txt"]);
++  });
++  await withFilm({}, async (c) => {
++    const id = await quoteAndApprove("S01,S02");
++    put(c.dir, "shots/S01/last-v2.png", PNG("new-last"));
++    assert.deepEqual(checkGates(FILM, id), ["S01 审核后改过文件：shots/S01/last-v2.png"]);
++  });
++});
++
++test("闸门 4：报价之后又审核过（审核记录不是报价时那份）也被拒", async () => {
++  await withFilm({}, async (c) => {
++    const id = await quoteAndApprove("S01,S02");
++    review(c.dir, "S01", 2, "pass");
++    assert.deepEqual(checkGates(FILM, id), ["S01 报价后又审核过，请重新报价"]);
++  });
++});
++
++test("闸门 5：没有批准 / 批准金额对不上 / 批准的不是这份报价", async () => {
++  await withFilm({}, async (c) => {
++    const id = await quoteAndApprove("S01,S02");
++    const p = join(c.dir, "approvals", `${id}.json`);
++    const a = JSON.parse(readFileSync(p, "utf8"));
++    writeFileSync(p, JSON.stringify({ ...a, totalCNY: 0.5 }));
++    assert.deepEqual(checkGates(FILM, id), [`报价 ${id} 还没有本人批准`]);
++    writeFileSync(p, JSON.stringify({ ...a, totalCNY: "1.5" }));
++    assert.deepEqual(checkGates(FILM, id), [`报价 ${id} 还没有本人批准`]);
++    writeFileSync(p, JSON.stringify({ ...a, quote: "Q7" }));
++    assert.deepEqual(checkGates(FILM, id), [`报价 ${id} 还没有本人批准`]);
++    unlinkSync(p);
++    assert.deepEqual(checkGates(FILM, id), [`报价 ${id} 还没有本人批准`]);
++  });
++});
++
++test("闸门 6：提交时按 spend.jsonl 重算，会超预算就拒", async () => {
++  await withFilm({}, async (c) => {
++    const id = await quoteAndApprove("S01,S02");
++    writeFileSync(join(c.dir, "spend.jsonl"), JSON.stringify({ quote: "Q0", shot: "X", cny: 98.6 }) + "\n");
++    assert.deepEqual(checkGates(FILM, id), ["花费会超预算：已花 ¥98.6 + 本次 ¥1.5 > 预算 ¥100.0"]);
++  });
++});
++
++test("闸门 7：报价已经提交过", async () => {
++  await withFilm({}, async (c) => {
++    const id = await quoteAndApprove("S01,S02");
++    writeFileSync(join(c.dir, "spend.jsonl"), JSON.stringify({ quote: id, shot: "S01", task: "t", cny: 0.75 }) + "\n");
++    assert.deepEqual(checkGates(FILM, id), [`报价 ${id} 已经提交过`]);
++  });
++});
++
++// ---------- submit ----------
++
++test("submit：闸门通过后逐镜头建任务、记账、改状态；请求格式与鉴权头正确；输出不含 Key", async () => {
++  await withFilm({}, async (c) => {
++    const id = await quoteAndApprove("S01,S02");
++    c.out.length = 0;
++    assert.equal(await main(["submit", FILM, "--quote", id]), 0);
++    const creates = c.gw.creates();
++    assert.equal(creates.length, 2);
++    for (const [i, s] of ["S01", "S02"].entries()) {
++      const r = creates[i];
++      assert.equal(r.authorization, `Bearer ${KEY}`);
++      const b = r.body as any;
++      assert.equal(b.model, "seedance-2.0-mini");
++      assert.equal(b.prompt, `${s} 的七段式提示词`);
++      assert.equal(b.seconds, 5);
++      assert.equal(b.resolution, "720p");
++      assert.equal(b.aspect_ratio, "16:9");
++      assert.equal(b.task_mode, "first_last_frame");
++      assert.deepEqual(b.content, [
++        { type: "image_url", role: "first_frame", url: "data:image/png;base64," + Buffer.from(PNG(`${s}-first`)).toString("base64") },
++        { type: "image_url", role: "last_frame", url: "data:image/png;base64," + Buffer.from(PNG(`${s}-last`)).toString("base64") },
++      ]);
++    }
++    const rows = spendLines(c.dir);
++    assert.equal(rows.length, 2);
++    assert.deepEqual(Object.keys(rows[0]).sort(), ["at", "billable", "cny", "model", "quote", "shot", "task"]);
++    assert.equal(rows[0].quote, id);
++    assert.equal(rows[0].shot, "S01");
++    assert.equal(rows[0].task, "task_fake0001");
++    assert.equal(rows[0].model, "seedance-2.0-mini");
++    assert.equal(rows[0].billable, 5);
++    assert.ok(Math.abs(rows[0].cny - 0.75) < 1e-9);
++    const st = readState(FILM);
++    assert.equal(st.shots.S01.status, "generating");
++    assert.equal(st.shots.S02.status, "generating");
++    assert.ok(Math.abs(st.spentCNY - 1.5) < 1e-9);
++    noKey(c);
++    for (const f of ["spend.jsonl", "state.json"]) assert.ok(!readFileSync(join(c.dir, f), "utf8").includes(KEY));
++  });
++});
++
++test("submit：闸门不过就逐条打印原因、退出 1、不发任何请求", async () => {
++  await withFilm({}, async (c) => {
++    const id = await quoteAndApprove("S01,S02");
++    unlinkSync(join(c.dir, "approvals", `${id}.json`));
++    appendFileSync(join(c.dir, "shots", "S01", "prompt-v1.txt"), "字");
++    c.out.length = 0;
++    assert.equal(await main(["submit", FILM, "--quote", id]), 1);
++    assert.ok(c.out.includes("S01 审核后改过文件：shots/S01/prompt-v1.txt"));
++    assert.ok(c.out.includes(`报价 ${id} 还没有本人批准`));
++    assert.equal(c.gw.requests.length, 0);
++    assert.deepEqual(spendLines(c.dir), []);
++  });
++});
++
++test("rejects quote already submitted：第二次提交退出 1，网关只收到第一次的请求，spend.jsonl 行数不变", async () => {
++  await withFilm({}, async (c) => {
++    const id = await quoteAndApprove("S01,S02");
++    assert.equal(await main(["submit", FILM, "--quote", id]), 0);
++    assert.equal(c.gw.creates().length, 2);
++    assert.equal(await main(["submit", FILM, "--quote", id]), 1);
++    assert.ok(c.out.includes(`报价 ${id} 已经提交过`));
++    assert.equal(c.gw.creates().length, 2);
++    assert.equal(spendLines(c.dir).length, 2);
++  });
++});
++
++test("stops batch on arrears：3 镜，第 2 个请求欠费 → 退出 4，只记 1 行，网关只收到 2 个请求", async () => {
++  await withFilm({ shots: ["S01", "S02", "S03"], gw: { creates: ["ok", "arrears"] } }, async (c) => {
++    const id = await quoteAndApprove("S01,S02,S03");
++    c.out.length = 0;
++    assert.equal(await main(["submit", FILM, "--quote", id]), 4);
++    assert.ok(c.out.includes("欠费：已提交 1 镜，其余未提交"), c.out.join("\n"));
++    assert.equal(spendLines(c.dir).length, 1);
++    assert.equal(c.gw.creates().length, 2);
++    const st = readState(FILM);
++    assert.equal(st.shots.S01.status, "generating");
++    assert.equal(st.shots.S02.status, "ready");
++    assert.equal(st.shots.S03.status, "ready");
++    noKey(c);
++  });
++});
++
++test("网关报错正文里带 Key 时打印前脱敏；退出 1，不记账", async () => {
++  await withFilm({ gw: { creates: ["echo-key"] } }, async (c) => {
++    const id = await quoteAndApprove("S01,S02");
++    c.out.length = 0;
++    assert.equal(await main(["submit", FILM, "--quote", id]), 1);
++    assert.match(c.out.join("\n"), /HTTP 400/);
++    assert.equal(c.gw.creates().length, 1);
++    assert.deepEqual(spendLines(c.dir), []);
++    noKey(c);
++  });
++});
++
++test("提交时连接断开（结果不明）：退出 1，按可能已扣费记账，之后同一报价不能再提交", async () => {
++  await withFilm({ gw: { creates: ["crash"] } }, async (c) => {
++    const id = await quoteAndApprove("S01,S02");
++    c.out.length = 0;
++    assert.equal(await main(["submit", FILM, "--quote", id]), 1);
++    assert.match(c.out.join("\n"), /结果不明/);
++    const rows = spendLines(c.dir);
++    assert.equal(rows.length, 1);
++    assert.equal(rows[0].task, null);
++    assert.equal(rows[0].uncertain, true);
++    assert.ok(Math.abs(rows[0].cny - 0.75) < 1e-9);
++    assert.equal(c.gw.creates().length, 1);
++    assert.deepEqual(checkGates(FILM, id), [`报价 ${id} 已经提交过`]);
++    noKey(c);
++  });
++});
++
++test("没设 SEEDANCE_API_KEY：退出 1，不发请求", async () => {
++  await withFilm({}, async (c) => {
++    const id = await quoteAndApprove("S01,S02");
++    delete process.env.SEEDANCE_API_KEY;
++    for (const argv of [["submit", FILM, "--quote", id], ["poll", FILM], ["fetch", FILM], ["wait", FILM]]) {
++      c.out.length = 0;
++      assert.equal(await main(argv), 1, argv.join(" "));
++      assert.equal(c.out.at(-1), "没有设置 SEEDANCE_API_KEY");
++    }
++    assert.equal(c.gw.requests.length, 0);
++  });
++});
++
++test("另一个提交正在进行（有锁文件）：退出 1，不发请求", async () => {
++  await withFilm({}, async (c) => {
++    const id = await quoteAndApprove("S01,S02");
++    writeFileSync(join(c.dir, ".submit.lock"), "");
++    assert.equal(await main(["submit", FILM, "--quote", id]), 1);
++    assert.match(c.out.at(-1)!, /另一个提交正在进行/);
++    assert.equal(c.gw.requests.length, 0);
++  });
++});
++
++test("参数不对：退出 2", async () => {
++  await withFilm({}, async () => {
++    for (const argv of [[], ["submit", FILM], ["submit", FILM, "--quote"], ["bogus", FILM], ["wait", FILM, "--interval", "-1"], ["poll"]]) {
++      assert.equal(await main(argv), 2, JSON.stringify(argv));
++    }
++  });
++});
++
++// ---------- poll / fetch / wait ----------
++
++test("poll：有任务在跑时退出 10；--json 输出数组；全部结束退出 0", async () => {
++  await withFilm({ gw: { succeedAfter: 2 } }, async (c) => {
++    const id = await quoteAndApprove("S01,S02");
++    assert.equal(await main(["submit", FILM, "--quote", id]), 0);
++    c.out.length = 0;
++    assert.equal(await main(["poll", FILM, "--json"]), 10);
++    const arr = JSON.parse(c.out.at(-1)!);
++    assert.deepEqual(arr.map((x: any) => [x.shot, x.task, x.status]), [["S01", "task_fake0001", "queued"], ["S02", "task_fake0002", "queued"]]);
++    assert.equal(await main(["poll", FILM]), 0);
++    noKey(c);
++  });
++});
++
++test("wait：第 3 次查询成功 → 下载 clip-v1.mp4、更新 state、退出 0", async () => {
++  const video = new TextEncoder().encode("REAL-ENOUGH-MP4");
++  await withFilm({ shots: ["S01"], gw: { succeedAfter: 3, video } }, async (c) => {
++    const id = await quoteAndApprove("S01");
++    assert.equal(await main(["submit", FILM, "--quote", id]), 0);
++    assert.equal(await main(["wait", FILM, "--interval", "0"]), 0);
++    const clip = join(c.dir, "shots", "S01", "clip-v1.mp4");
++    assert.deepEqual(new Uint8Array(readFileSync(clip)), video);
++    const st = readState(FILM);
++    assert.equal(st.shots.S01.clip, "shots/S01/clip-v1.mp4");
++    assert.equal(st.shots.S01.status, "generated");
++    const queries = c.gw.requests.filter((r) => r.method === "GET" && r.path === "/v1/videos/task_fake0001");
++    assert.ok(queries.length >= 3);
++    for (const r of c.gw.requests) assert.equal(r.authorization, `Bearer ${KEY}`);
++    // 已下载的任务不再查询；再 wait 立即结束
++    const before = c.gw.requests.length;
++    assert.equal(await main(["wait", FILM, "--interval", "0"]), 0);
++    assert.equal(c.gw.requests.length, before);
++    noKey(c);
++  });
++});
++
++test("wait --timeout 1：还没出完 → 退出 6", async () => {
++  await withFilm({ shots: ["S01"], gw: { succeedAfter: 100000 } }, async (c) => {
++    const id = await quoteAndApprove("S01");
++    assert.equal(await main(["submit", FILM, "--quote", id]), 0);
++    c.out.length = 0;
++    const t0 = Date.now();
++    assert.equal(await main(["wait", FILM, "--interval", "0.2", "--timeout", "1"]), 6);
++    assert.ok(Date.now() - t0 < 5000);
++    assert.equal(c.out.at(-1), "还没出完，稍后再 wait");
++    assert.equal(existsSync(join(c.dir, "shots", "S01", "clip-v1.mp4")), false);
++  });
++});
++
++test("重拍后得到 clip-v2.mp4，clip-v1.mp4 还在", async () => {
++  await withFilm({ shots: ["S01"] }, async (c) => {
++    const q1 = await quoteAndApprove("S01");
++    assert.equal(await main(["submit", FILM, "--quote", q1]), 0);
++    assert.equal(await main(["wait", FILM, "--interval", "0"]), 0);
++    const q2 = await quoteAndApprove("S01");
++    assert.notEqual(q2, q1);
++    assert.equal(await main(["submit", FILM, "--quote", q2]), 0);
++    assert.equal(await main(["fetch", FILM]), 0);
++    assert.ok(existsSync(join(c.dir, "shots", "S01", "clip-v1.mp4")));
++    assert.ok(existsSync(join(c.dir, "shots", "S01", "clip-v2.mp4")));
++    assert.equal(readState(FILM).shots.S01.clip, "shots/S01/clip-v2.mp4");
++    assert.equal(spendLines(c.dir).length, 2);
++  });
++});
++
++test("fetch：失败的任务打印原因，状态记为 failed，之后不再查询", async () => {
++  await withFilm({ shots: ["S01"], gw: { result: "fail" } }, async (c) => {
++    const id = await quoteAndApprove("S01");
++    assert.equal(await main(["submit", FILM, "--quote", id]), 0);
++    c.out.length = 0;
++    assert.equal(await main(["fetch", FILM]), 0);
++    assert.ok(c.out.includes("S01 生成失败：内容审核未通过"), c.out.join("\n"));
++    assert.equal(readState(FILM).shots.S01.status, "failed");
++    assert.equal(existsSync(join(c.dir, "shots", "S01", "clip-v1.mp4")), false);
++    const before = c.gw.requests.length;
++    assert.equal(await main(["poll", FILM]), 0);
++    assert.equal(c.gw.requests.length, before);
++  });
++});

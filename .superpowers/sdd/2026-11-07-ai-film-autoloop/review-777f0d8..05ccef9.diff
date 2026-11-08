@@ -1,0 +1,789 @@
+# Review package: 777f0d8..HEAD
+
+## Commits
+05ccef9 feat: 审核的准备与记录
+
+## Files changed
+ .../film-director/references/reviews/final.md      |  11 +
+ .../references/reviews/keyframe-plan.md            |  16 +
+ .../film-director/references/reviews/keyframes.md  |  14 +
+ .../film-director/references/reviews/pre-submit.md |  14 +
+ .../film-director/references/reviews/story.md      |  13 +
+ config/reviews.json                                |  19 ++
+ scripts/review.ts                                  | 347 +++++++++++++++++++++
+ tests/review.test.ts                               | 290 +++++++++++++++++
+ 8 files changed, 724 insertions(+)
+
+## Diff
+diff --git a/.claude/skills/film-director/references/reviews/final.md b/.claude/skills/film-director/references/reviews/final.md
+new file mode 100644
+index 0000000..ce0ab38
+--- /dev/null
++++ b/.claude/skills/film-director/references/reviews/final.md
+@@ -0,0 +1,11 @@
++你是第一次看这些材料的审核，只读不改，不要写或改任何文件。图片要用 Read 打开放大看。
++
++这是成片（成片和已解码好的帧见下面的资料列表）。你第一次看，我不告诉你任何结论。
++
++1. 全部解码，每镜取多张全分辨率帧，切点前后各取 3 帧。（帧已经解码好放在资料列表里，逐张打开看。）
++2. 先写你看懂的故事，再列看不懂的地方。
++3. 逐镜查：重复的动作、道具数量、穿帮、突跳、颜色跳变、脸变形、字的问题。
++4. 明确写出你查不了的东西（动态手感、声音）。
++5. 对照本人要求文件，列出被忘掉的要求。
++
++每条写：时间、帧号、问题。分“硬伤”和“小问题”。
+diff --git a/.claude/skills/film-director/references/reviews/keyframe-plan.md b/.claude/skills/film-director/references/reviews/keyframe-plan.md
+new file mode 100644
+index 0000000..1b3d4dd
+--- /dev/null
++++ b/.claude/skills/film-director/references/reviews/keyframe-plan.md
+@@ -0,0 +1,16 @@
++你是第一次看这些材料的审核，只读不改，不要写或改任何文件。图片要用 Read 打开放大看。
++
++这是这个镜头的首尾帧计划：首帧画什么、尾帧画什么、中间发生什么。图还没画，先审计划，审过了再画。
++材料：这个镜头的首尾帧计划、分镜表（路径见下面的资料列表）。
++
++把下面 8 项套到计划写的画面上逐条检查。有问题就写出是首帧还是尾帧、哪里不对。
++
++1. 动作要用到的东西，首帧里必须有。比如后面要拿杯子，首帧里就要看得到杯子，否则杯子会凭空冒出来。
++2. 别人的反应要提前摆好。一段视频就是一个镜头，没法中途切过去拍别人，所以首帧里要安排好：一个人在前面做事，另一个人在后面，脸朝着镜头。
++3. 很多人一起出现时，不能摆同一个姿势，不然模型会让所有人同时动。
++4. 给动作留出空间。东西要落到、飘到的地方要提前空出来，人的头顶也要留点空。
++5. 风往哪边吹要统一，不能围巾往左飘，床单却往右飘。
++6. 缩小到手机大小看一遍，远处的人太小、看不清就要改。
++7. 放大看有没有多余的东西，比如多一个水壶，或者多一条奇怪的细线。
++8. 把首帧和尾帧叠在一起看有没有错位。不该变的地方两张图必须一样。比如墙的颜色不一样，视频里墙就会慢慢变色；杯子大了一点，视频里杯子就会慢慢变大。
++9. 对照本人要求文件，列出被忘掉的要求。
+diff --git a/.claude/skills/film-director/references/reviews/keyframes.md b/.claude/skills/film-director/references/reviews/keyframes.md
+new file mode 100644
+index 0000000..e6c6779
+--- /dev/null
++++ b/.claude/skills/film-director/references/reviews/keyframes.md
+@@ -0,0 +1,14 @@
++你是第一次看这些材料的审核，只读不改，不要写或改任何文件。图片要用 Read 打开放大看。
++
++首尾帧画完了，按下面这些逐条检查，每张图都要放大看。有问题就写出是哪张图、哪里不对。
++材料：首帧、尾帧、设定图、这个镜头的分镜（路径见下面的资料列表）。
++
++1. 动作要用到的东西，首帧里必须有。比如后面要拿杯子，首帧里就要看得到杯子，否则杯子会凭空冒出来。
++2. 别人的反应要提前摆好。一段视频就是一个镜头，没法中途切过去拍别人，所以首帧里要安排好：一个人在前面做事，另一个人在后面，脸朝着镜头。
++3. 很多人一起出现时，不能摆同一个姿势，不然模型会让所有人同时动。
++4. 给动作留出空间。东西要落到、飘到的地方要提前空出来，人的头顶也要留点空。
++5. 风往哪边吹要统一，不能围巾往左飘，床单却往右飘。
++6. 缩小到手机大小看一遍，远处的人太小、看不清就要改。
++7. 放大看有没有多余的东西，比如多一个水壶，或者多一条奇怪的细线。
++8. 把首帧和尾帧叠在一起看有没有错位。不该变的地方两张图必须一样。比如墙的颜色不一样，视频里墙就会慢慢变色；杯子大了一点，视频里杯子就会慢慢变大。
++9. 对照本人要求文件，列出被忘掉的要求。
+diff --git a/.claude/skills/film-director/references/reviews/pre-submit.md b/.claude/skills/film-director/references/reviews/pre-submit.md
+new file mode 100644
+index 0000000..ee5430b
+--- /dev/null
++++ b/.claude/skills/film-director/references/reviews/pre-submit.md
+@@ -0,0 +1,14 @@
++你是第一次看这些材料的审核，只读不改，不要写或改任何文件。图片要用 Read 打开放大看。
++
++你是审核，只读不改。这个镜头马上要提交视频生成，花的是真钱。
++材料：提示词文件、首帧、尾帧、设定图、分镜表、配色规则（路径见下面的资料列表）。
++逐项核对，放大看图：
++
++1. 提示词的每句话和两张图对得上吗？（位置、左右、颜色、人数、道具数量、衣服、表情）
++2. 两张图的机位、大小、背景一致吗？
++3. 和设定图、配色规则、前后镜头对得上吗？
++4. 动作现实吗？每个动作的原因写了吗？手放在哪？
++5. 模型可能在哪里出错？（同时动作、凭空出现、长脸、走反方向、歧义词）
++6. 对照本人要求文件，列出被忘掉的要求。
++
++最后只写“通过”或“不通过”。不通过就在前面逐条列出要改什么。
+diff --git a/.claude/skills/film-director/references/reviews/story.md b/.claude/skills/film-director/references/reviews/story.md
+new file mode 100644
+index 0000000..fe660fe
+--- /dev/null
++++ b/.claude/skills/film-director/references/reviews/story.md
+@@ -0,0 +1,13 @@
++你是第一次看这些材料的审核，只读不改，不要写或改任何文件。图片要用 Read 打开放大看。
++
++这是一支短片的逐镜头故事。你是第一次看，只负责挑错，不改文件。
++
++1. 只按镜头顺序读，先写出你看懂的故事。
++2. 按顺序追问每个转折：为什么会这样？东西从哪来？够得着吗？现实里真会这样吗？
++3. 能用一句话说清想表达什么吗？
++4. 开头抓人吗？最抓眼球的画面放在前面了吗？
++5. 旁人的反应像真人吗？有没有先后？
++6. 哪些镜头 AI 视频模型容易拍错？（人物交叉、手拿小东西、文字、镜子和倒影、左右不对称的特征、一个镜头里换光、一个人连做三个动作、俯拍看不到脸、配角太多）
++7. 对照本人要求文件，列出被忘掉的要求。
++
++每条写：镜头、问题、建议改法。没把握的写“可能”。最后写“通过”或“不通过”。
+diff --git a/config/reviews.json b/config/reviews.json
+new file mode 100644
+index 0000000..ae6b521
+--- /dev/null
++++ b/config/reviews.json
+@@ -0,0 +1,19 @@
++{
++  "story": ["story/shots-v*.md"],
++  "keyframe-plan": ["shots/<镜头>/plan-v*.md", "board/storyboard-v*.md"],
++  "keyframes": [
++    "shots/<镜头>/first-v*.png",
++    "shots/<镜头>/last-v*.png",
++    "style/sheet-*-v*.png",
++    "shots/<镜头>/plan-v*.md"
++  ],
++  "pre-submit": [
++    "shots/<镜头>/prompt-v*.txt",
++    "shots/<镜头>/first-v*.png",
++    "shots/<镜头>/last-v*.png",
++    "style/sheet-*-v*.png",
++    "board/storyboard-v*.md",
++    "board/palette-v*.md"
++  ],
++  "final": ["out/final-v*.mp4", "out/final-v*-frames/"]
++}
+diff --git a/scripts/review.ts b/scripts/review.ts
+new file mode 100644
+index 0000000..08b811a
+--- /dev/null
++++ b/scripts/review.ts
+@@ -0,0 +1,347 @@
++import { readFileSync, readdirSync } from "node:fs";
++import { dirname, join, relative, resolve } from "node:path";
++import { fileURLToPath } from "node:url";
++import { filmDir, assertFilmName } from "./lib/paths.ts";
++import { writeNew } from "./lib/versioned.ts";
++import { sha256File } from "./lib/hash.ts";
++
++export type ReviewKind = "story" | "keyframe-plan" | "keyframes" | "pre-submit" | "final";
++export type Verdict = "pass" | "fail";
++
++export interface ReviewRecord {
++  kind: ReviewKind;
++  film: string;
++  shot: string | null;
++  verdict: Verdict;
++  at: string;
++  files: Record<string, string>; // 绝对路径 → sha256
++}
++
++interface PromptMeta {
++  kind: ReviewKind;
++  film: string;
++  shot: string | null;
++  n: number;
++  files: Record<string, string>;
++}
++
++const KINDS: readonly ReviewKind[] = ["story", "keyframe-plan", "keyframes", "pre-submit", "final"];
++const SHOT_RE = /^[A-Za-z0-9_]{1,20}$/;
++const IMAGE_RE = /\.(png|jpe?g|webp)$/i;
++const USAGE =
++  "用法：review.ts prepare <story|keyframe-plan|keyframes|pre-submit|final> <片名> [--shot S03]\n" +
++  "      review.ts record <片名> --prompt <prompt.md 路径> --reply <回复文件>";
++const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
++
++/** 资料缺失（退出 3）。 */
++class MissingMaterial extends Error {}
++
++function fwd(p: string): string {
++  return p.replace(/\\/g, "/");
++}
++
++function escapeRe(s: string): string {
++  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
++}
++
++function isKind(s: string | undefined): s is ReviewKind {
++  return KINDS.includes(s as ReviewKind);
++}
++
++/** 模式配置属于代码仓库，按本文件位置定位（与 FILM_ROOT 无关）。 */
++function readPatterns(kind: ReviewKind): string[] {
++  const cfg = JSON.parse(readFileSync(join(REPO, "config", "reviews.json"), "utf8")) as Record<string, unknown>;
++  const list = cfg[kind];
++  if (!Array.isArray(list) || list.length === 0 || !list.every((p) => typeof p === "string")) {
++    throw new Error(`config/reviews.json 里 ${kind} 的模式不合法`);
++  }
++  return list as string[];
++}
++
++function needsShot(kind: ReviewKind): boolean {
++  return readPatterns(kind).some((p) => p.includes("<镜头>"));
++}
++
++function checklistPath(kind: ReviewKind): string {
++  return join(REPO, ".claude", "skills", "film-director", "references", "reviews", `${kind}.md`);
++}
++
++/** 只认"去掉空白和 Markdown 加粗后的最后一个非空行"恰好等于"通过"。 */
++export function parseVerdict(text: string): Verdict {
++  const lines = text
++    .split(/\r?\n/)
++    .map((l) => l.replace(/\*\*|__/g, "").replace(/[\s\u200b\ufeff]/g, ""))
++    .filter((l) => l !== "");
++  return lines.at(-1) === "通过" ? "pass" : "fail";
++}
++
++function listEntries(dir: string): { name: string; isDir: boolean; isFile: boolean }[] {
++  try {
++    return readdirSync(dir, { withFileTypes: true }).map((d) => ({
++      name: d.name,
++      isDir: d.isDirectory(),
++      isFile: d.isFile(),
++    }));
++  } catch (err) {
++    if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
++    throw err;
++  }
++}
++
++/**
++ * 把最后一段（如 `sheet-*-v*.png`）编成正则：`v*` 是版本号（数字），其余 `*` 是分组名。
++ * 返回正则和版本号所在的捕获组序号。
++ */
++function compileSegment(seg: string): { re: RegExp; versionGroup: number } {
++  const parts = seg.split("*");
++  let src = "^";
++  let versionGroup = 0;
++  for (let i = 0; i < parts.length; i++) {
++    src += escapeRe(parts[i]);
++    if (i === parts.length - 1) break;
++    if (parts[i].endsWith("v") && versionGroup === 0) {
++      src += "(\\d+)";
++      versionGroup = i + 1;
++    } else {
++      src += "(.+)";
++    }
++  }
++  if (versionGroup === 0) throw new Error(`模式里没有版本号 v*：${seg}`);
++  return { re: new RegExp(src + "$"), versionGroup };
++}
++
++/** 一个模式匹配到的最新版本（每个分组各取 n 最大的），按分组名排序；目录模式展开为其中的图片。 */
++function expandPattern(root: string, pattern: string): string[] {
++  const isDirPattern = pattern.endsWith("/");
++  const segs = pattern.replace(/\/$/, "").split("/");
++  const last = segs.pop()!;
++  if (segs.some((s) => s.includes("*"))) throw new Error(`只有最后一段可以有 *：${pattern}`);
++  const base = join(root, ...segs);
++  const { re, versionGroup } = compileSegment(last);
++
++  const best = new Map<string, { n: number; name: string }>();
++  for (const e of listEntries(base)) {
++    if (isDirPattern ? !e.isDir : !e.isFile) continue;
++    const m = re.exec(e.name);
++    if (!m) continue;
++    const n = Number(m[versionGroup]);
++    const key = m.filter((_, i) => i > 0 && i !== versionGroup).join("\u0000");
++    const cur = best.get(key);
++    if (!cur || n > cur.n) best.set(key, { n, name: e.name });
++  }
++  const chosen = [...best.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([, v]) => join(base, v.name));
++  if (!isDirPattern) return chosen;
++
++  const out: string[] = [];
++  for (const d of chosen) {
++    const imgs = listEntries(d)
++      .filter((e) => e.isFile && IMAGE_RE.test(e.name))
++      .map((e) => e.name)
++      .sort();
++    for (const name of imgs) out.push(join(d, name));
++  }
++  return out;
++}
++
++function collectMaterials(kind: ReviewKind, film: string, shot?: string): { files: string[]; missing: string[] } {
++  const root = filmDir(film);
++  if (needsShot(kind) && (!shot || !SHOT_RE.test(shot))) throw new Error(`${kind} 审核要指定合法的镜头`);
++  const files: string[] = [];
++  const missing: string[] = [];
++  for (const raw of readPatterns(kind)) {
++    const pattern = raw.replaceAll("<镜头>", shot ?? "");
++    const got = expandPattern(root, pattern);
++    if (got.length === 0) missing.push(pattern);
++    for (const p of got) {
++      const abs = fwd(resolve(p));
++      if (!files.includes(abs)) files.push(abs);
++    }
++  }
++  return { files, missing };
++}
++
++/** 绝对路径（`/` 分隔），按 config/reviews.json 取每类模式下最新版本；有模式没匹配到就抛错。 */
++export function materialsFor(kind: ReviewKind, film: string, shot?: string): string[] {
++  const { files, missing } = collectMaterials(kind, film, shot);
++  if (missing.length > 0) throw new MissingMaterial(`缺少资料：${missing.join("、")}`);
++  return files;
++}
++
++/** 同一轮的 .prompt.md / .prompt.json / .md / .json 共用 n；取四种后缀里最大的 n 加 1。 */
++function nextRound(reviewsDir: string, base: string): number {
++  const re = new RegExp(`^${escapeRe(base)}-v(\\d+)\\.(?:prompt\\.md|prompt\\.json|md|json)$`);
++  let max = 0;
++  for (const e of listEntries(reviewsDir)) {
++    const m = re.exec(e.name);
++    if (m) max = Math.max(max, Number(m[1]));
++  }
++  return max + 1;
++}
++
++function baseName(kind: ReviewKind, shot: string | null): string {
++  return shot ? `${kind}-${shot}` : kind;
++}
++
++function isForbidden(root: string, abs: string): boolean {
++  const rel = fwd(relative(root, abs));
++  return rel === "state.json" || rel.endsWith("/state.json") || rel === "reviews" || rel.startsWith("reviews/");
++}
++
++async function prepare(args: string[]): Promise<number> {
++  const [kind, film, ...rest] = args;
++  let shot: string | undefined;
++  for (let i = 0; i < rest.length; i++) {
++    if (rest[i] === "--shot" && i + 1 < rest.length) shot = rest[++i];
++    else return usage();
++  }
++  if (!isKind(kind) || !film) return usage();
++  try {
++    assertFilmName(film);
++  } catch (err) {
++    console.error((err as Error).message);
++    return 2;
++  }
++  const wantShot = needsShot(kind);
++  if (wantShot ? !shot || !SHOT_RE.test(shot) : shot !== undefined) return usage();
++
++  const root = filmDir(film);
++  const { files, missing } = collectMaterials(kind, film, shot);
++  const req = fwd(join(root, "requirements.md"));
++  if (listEntries(root).every((e) => !(e.isFile && e.name === "requirements.md"))) missing.push("requirements.md");
++  if (missing.length > 0) {
++    console.error(`缺少资料：${missing.join("、")}`);
++    return 3;
++  }
++  for (const p of files) {
++    if (isForbidden(root, p)) throw new Error(`资料里不能有 state.json 或 reviews/ 下的文件：${p}`);
++  }
++
++  const reviewsDir = join(root, "reviews");
++  const s = shot ?? null;
++  const base = baseName(kind, s);
++  const n = nextRound(reviewsDir, base);
++  const hashes: Record<string, string> = {};
++  for (const p of [...files, req]) hashes[p] = sha256File(p);
++
++  const checklist = readFileSync(checklistPath(kind), "utf8");
++  const text =
++    checklist +
++    "\n\n资料（只读这些文件，不要读别的）：\n" +
++    files.join("\n") +
++    "\n本人要求：" +
++    req +
++    '\n\n最后一行只写"通过"或"不通过"。';
++  const meta: PromptMeta = { kind, film, shot: s, n, files: hashes };
++  const promptPath = join(reviewsDir, `${base}-v${n}.prompt.md`);
++  writeNew(promptPath, text);
++  writeNew(join(reviewsDir, `${base}-v${n}.prompt.json`), JSON.stringify(meta, null, 2) + "\n");
++  console.log(fwd(promptPath));
++  return 0;
++}
++
++async function record(args: string[]): Promise<number> {
++  const [film, ...rest] = args;
++  let promptArg: string | undefined;
++  let replyArg: string | undefined;
++  for (let i = 0; i < rest.length; i++) {
++    if (rest[i] === "--prompt" && i + 1 < rest.length) promptArg = rest[++i];
++    else if (rest[i] === "--reply" && i + 1 < rest.length) replyArg = rest[++i];
++    else return usage();
++  }
++  if (!film || !promptArg || !replyArg) return usage();
++  let root: string;
++  try {
++    root = filmDir(film);
++  } catch (err) {
++    console.error((err as Error).message);
++    return 2;
++  }
++
++  const reviewsDir = resolve(root, "reviews");
++  const promptPath = resolve(promptArg);
++  const sameDir =
++    process.platform === "win32"
++      ? dirname(promptPath).toLowerCase() === reviewsDir.toLowerCase()
++      : dirname(promptPath) === reviewsDir;
++  const name = promptPath.slice(dirname(promptPath).length + 1);
++  const m = /^(.+)-v(\d+)\.prompt\.md$/.exec(name);
++  if (!sameDir || !m) {
++    console.error(`提示词文件要是本片 reviews/ 下的 .prompt.md：${fwd(promptArg)}`);
++    return 2;
++  }
++  const [, base, nStr] = m;
++
++  let meta: PromptMeta;
++  try {
++    meta = JSON.parse(readFileSync(join(reviewsDir, `${base}-v${nStr}.prompt.json`), "utf8")) as PromptMeta;
++  } catch {
++    console.error(`读不到 ${base}-v${nStr}.prompt.json，先用 prepare 生成。`);
++    return 2;
++  }
++  if (
++    !isKind(meta.kind) || meta.film !== film || meta.n !== Number(nStr) ||
++    baseName(meta.kind, meta.shot) !== base || typeof meta.files !== "object" || meta.files === null
++  ) {
++    console.error(`${base}-v${nStr}.prompt.json 和提示词文件对不上`);
++    return 2;
++  }
++
++  const changed: string[] = [];
++  for (const [p, h] of Object.entries(meta.files)) {
++    let now: string | null;
++    try {
++      now = sha256File(p);
++    } catch {
++      now = null;
++    }
++    if (now !== h) changed.push(fwd(relative(root, p)));
++  }
++  if (changed.length > 0) {
++    console.error(`审核期间文件变了：${changed.join("、")}`);
++    return 3;
++  }
++
++  let reply: string;
++  try {
++    reply = readFileSync(resolve(replyArg), "utf8");
++  } catch {
++    console.error(`读不到回复文件：${fwd(replyArg)}`);
++    return 2;
++  }
++  const verdict = parseVerdict(reply);
++  const rec: ReviewRecord = {
++    kind: meta.kind,
++    film,
++    shot: meta.shot,
++    verdict,
++    at: new Date().toISOString(),
++    files: meta.files,
++  };
++  const mdName = `${base}-v${nStr}.md`;
++  try {
++    writeNew(join(reviewsDir, mdName), reply);
++    writeNew(join(reviewsDir, `${base}-v${nStr}.json`), JSON.stringify(rec, null, 2) + "\n");
++  } catch (err) {
++    if ((err as NodeJS.ErrnoException).code === "EEXIST") {
++      console.error(`这一轮已经记录过：reviews/${base}-v${nStr}，重新审核请再 prepare 一轮。`);
++      return 2;
++    }
++    throw err;
++  }
++  console.log(`审核 ${meta.kind}：${verdict === "pass" ? "通过" : "不通过"}（reviews/${mdName}）`);
++  return verdict === "pass" ? 0 : 1;
++}
++
++function usage(): number {
++  console.error(USAGE);
++  return 2;
++}
++
++export async function main(argv: string[]): Promise<number> {
++  const [cmd, ...args] = argv;
++  if (cmd === "prepare") return prepare(args);
++  if (cmd === "record") return record(args);
++  return usage();
++}
++
++if (import.meta.main) process.exit(await main(process.argv.slice(2)));
+diff --git a/tests/review.test.ts b/tests/review.test.ts
+new file mode 100644
+index 0000000..5b893b6
+--- /dev/null
++++ b/tests/review.test.ts
+@@ -0,0 +1,290 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { dirname, join, resolve } from "node:path";
++import { fileURLToPath } from "node:url";
++import { main, materialsFor, parseVerdict, type ReviewKind } from "../scripts/review.ts";
++import { main as newFilm } from "../scripts/new-film.ts";
++import { buildQuote } from "../scripts/quote.ts";
++import { readState, writeState } from "../scripts/lib/state.ts";
++import { sha256File } from "../scripts/lib/hash.ts";
++
++const FILM = "审核片";
++const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
++
++function fwd(p: string): string {
++  return p.replace(/\\/g, "/");
++}
++
++/** 临时 FILM_ROOT + 一部用 new-film 开好的片子 + 捕获 console 输出。 */
++async function withFilm(fn: (dir: string, out: string[]) => Promise<void> | void): Promise<void> {
++  const root = mkdtempSync(join(tmpdir(), "film-review-"));
++  const saved = process.env.FILM_ROOT;
++  const out: string[] = [];
++  const log = console.log;
++  const err = console.error;
++  console.log = (...a: unknown[]) => void out.push(a.join(" "));
++  console.error = (...a: unknown[]) => void out.push(a.join(" "));
++  try {
++    process.env.FILM_ROOT = root;
++    assert.equal(await newFilm([FILM, "一只猫偷鱼", "--no-emit"]), 0);
++    const dir = join(root, "films", FILM);
++    const st = readState(FILM);
++    st.settings.budgetCNY = 100;
++    st.shots.S01 = { seconds: 4.4, status: "ready", clip: null };
++    writeState(st);
++    out.length = 0;
++    await fn(dir, out);
++  } finally {
++    console.log = log;
++    console.error = err;
++    if (saved === undefined) delete process.env.FILM_ROOT;
++    else process.env.FILM_ROOT = saved;
++    rmSync(root, { recursive: true, force: true });
++  }
++}
++
++function put(dir: string, rel: string, data = rel): string {
++  const p = join(dir, ...rel.split("/"));
++  mkdirSync(dirname(p), { recursive: true });
++  writeFileSync(p, data);
++  return p;
++}
++
++/** pre-submit 需要的全部资料（含旧版本，用来验证"取最新"）。 */
++function preSubmitMaterials(dir: string, opts: { first?: boolean } = {}): void {
++  put(dir, "shots/S01/prompt-v1.txt", "旧提示词");
++  put(dir, "shots/S01/prompt-v2.txt", "【画风】…");
++  if (opts.first !== false) {
++    put(dir, "shots/S01/first-v1.png");
++    put(dir, "shots/S01/first-v10.png");
++    put(dir, "shots/S01/first-v9.png");
++  }
++  put(dir, "shots/S01/last-v1.png");
++  put(dir, "style/sheet-猫-v1.png");
++  put(dir, "style/sheet-猫-v2.png");
++  put(dir, "style/sheet-鱼贩-v1.png");
++  put(dir, "board/storyboard-v1.md");
++  put(dir, "board/palette-v1.md");
++}
++
++function reviewFiles(dir: string): string[] {
++  return readdirSync(join(dir, "reviews")).sort();
++}
++
++test("parseVerdict：只看去掉空白和加粗后的最后一个非空行", () => {
++  assert.equal(parseVerdict("镜头 1 没问题\n通过"), "pass");
++  assert.equal(parseVerdict("镜头 1 没问题\n\n  **通过**  \n\n"), "pass");
++  assert.equal(parseVerdict("说明\r\n通过\r\n"), "pass");
++  assert.equal(parseVerdict("镜头 1 有问题\n不通过"), "fail");
++  assert.equal(parseVerdict("还行\n基本通过"), "fail");
++  assert.equal(parseVerdict("通过\n还有一条建议"), "fail");
++  assert.equal(parseVerdict(""), "fail");
++  assert.equal(parseVerdict("\n  \n"), "fail");
++});
++
++test("五份清单都在：开头说只读，结尾要求对照本人要求", () => {
++  const cfg = JSON.parse(readFileSync(join(REPO, "config", "reviews.json"), "utf8"));
++  const kinds: ReviewKind[] = ["story", "keyframe-plan", "keyframes", "pre-submit", "final"];
++  assert.deepEqual(Object.keys(cfg).sort(), [...kinds].sort());
++  for (const k of kinds) {
++    const text = readFileSync(join(REPO, ".claude", "skills", "film-director", "references", "reviews", `${k}.md`), "utf8");
++    assert.ok(
++      text.startsWith("你是第一次看这些材料的审核，只读不改，不要写或改任何文件。图片要用 Read 打开放大看。"),
++      `${k} 开头不对`,
++    );
++    const items = text.split(/\r?\n/).filter((l) => /^\d+\. /.test(l));
++    assert.match(items.at(-1)!, /^\d+\. 对照本人要求文件，列出被忘掉的要求。$/, `${k} 最后一项不对`);
++  }
++});
++
++test("materialsFor：每类模式取最新版本，每个角色的设定图各取最新", async () => {
++  await withFilm((dir) => {
++    preSubmitMaterials(dir);
++    const got = materialsFor("pre-submit", FILM, "S01").map(fwd);
++    const want = [
++      "shots/S01/prompt-v2.txt",
++      "shots/S01/first-v10.png",
++      "shots/S01/last-v1.png",
++      "style/sheet-猫-v2.png",
++      "style/sheet-鱼贩-v1.png",
++      "board/storyboard-v1.md",
++      "board/palette-v1.md",
++    ].map((r) => fwd(join(dir, r)));
++    assert.deepEqual([...got].sort(), [...want].sort());
++    for (const p of got) assert.ok(existsSync(p));
++  });
++});
++
++test("materialsFor final：最新成片和对应帧目录下的全部图片", async () => {
++  await withFilm((dir) => {
++    put(dir, "out/final-v1.mp4");
++    put(dir, "out/final-v2.mp4");
++    put(dir, "out/final-v1-frames/0001.png");
++    put(dir, "out/final-v2-frames/0001.png");
++    put(dir, "out/final-v2-frames/0002.jpg");
++    put(dir, "out/final-v2-frames/notes.txt");
++    const got = materialsFor("final", FILM).map(fwd).sort();
++    const want = ["out/final-v2.mp4", "out/final-v2-frames/0001.png", "out/final-v2-frames/0002.jpg"]
++      .map((r) => fwd(join(dir, r)))
++      .sort();
++    assert.deepEqual(got, want);
++  });
++});
++
++test("prepare：写出 .prompt.md 和 .prompt.json，列出提示词、首帧、尾帧绝对路径，不含 state.json 和 reviews/", async () => {
++  await withFilm(async (dir, out) => {
++    preSubmitMaterials(dir);
++    assert.equal(await main(["prepare", "pre-submit", FILM, "--shot", "S01"]), 0);
++    assert.deepEqual(reviewFiles(dir), ["pre-submit-S01-v1.prompt.json", "pre-submit-S01-v1.prompt.md"]);
++    const promptPath = join(dir, "reviews", "pre-submit-S01-v1.prompt.md");
++    assert.equal(out.at(-1)!.includes(fwd(promptPath)), true);
++    assert.equal(out.at(-1)!.includes("\\"), false);
++
++    const text = readFileSync(promptPath, "utf8");
++    const checklist = readFileSync(
++      join(REPO, ".claude", "skills", "film-director", "references", "reviews", "pre-submit.md"),
++      "utf8",
++    );
++    assert.ok(text.startsWith(checklist + "\n\n资料（只读这些文件，不要读别的）：\n"));
++    for (const r of ["shots/S01/prompt-v2.txt", "shots/S01/first-v10.png", "shots/S01/last-v1.png"]) {
++      assert.ok(text.includes(fwd(join(dir, r))), `缺 ${r}`);
++    }
++    assert.ok(text.includes(`\n本人要求：${fwd(join(dir, "requirements.md"))}`));
++    assert.ok(text.endsWith(`\n\n最后一行只写"通过"或"不通过"。`));
++    assert.equal(text.includes("state.json"), false);
++    assert.equal(text.includes("reviews/"), false);
++    assert.equal(text.includes("first-v9.png"), false);
++
++    const meta = JSON.parse(readFileSync(join(dir, "reviews", "pre-submit-S01-v1.prompt.json"), "utf8"));
++    assert.deepEqual(Object.keys(meta), ["kind", "film", "shot", "n", "files"]);
++    assert.equal(meta.kind, "pre-submit");
++    assert.equal(meta.film, FILM);
++    assert.equal(meta.shot, "S01");
++    assert.equal(meta.n, 1);
++    const first = fwd(join(dir, "shots/S01/first-v10.png"));
++    assert.equal(meta.files[first], sha256File(first));
++  });
++});
++
++test("prepare：缺首帧时退出 3，输出以\"缺少资料：\"开头，不写任何文件", async () => {
++  await withFilm(async (dir, out) => {
++    preSubmitMaterials(dir, { first: false });
++    assert.equal(await main(["prepare", "pre-submit", FILM, "--shot", "S01"]), 3);
++    assert.match(out.at(-1)!, /^缺少资料：.*first-v\*\.png/);
++    assert.deepEqual(reviewFiles(dir), []);
++  });
++});
++
++test("prepare：参数不对退出 2", async () => {
++  await withFilm(async () => {
++    assert.equal(await main(["prepare", "nope", FILM]), 2);
++    assert.equal(await main(["prepare", "pre-submit", FILM]), 2); // 缺 --shot
++    assert.equal(await main(["prepare", "story", FILM, "--shot", "S01"]), 2); // story 不分镜头
++    assert.equal(await main(["prepare", "pre-submit", FILM, "--shot", "../x"]), 2);
++    assert.equal(await main([]), 2);
++  });
++});
++
++async function prepareAndRecord(dir: string, reply: string): Promise<number> {
++  const before = new Set(reviewFiles(dir));
++  assert.equal(await main(["prepare", "pre-submit", FILM, "--shot", "S01"]), 0);
++  const prompt = reviewFiles(dir).find((f) => !before.has(f) && f.endsWith(".prompt.md"))!;
++  const replyPath = put(dir, `tmp/reply-${prompt}.txt`, reply);
++  return main(["record", FILM, "--prompt", join(dir, "reviews", prompt), "--reply", replyPath]);
++}
++
++test("record：末行\"通过\"退出 0，写出 .md（回复原文）和 .json（ReviewRecord）", async () => {
++  await withFilm(async (dir, out) => {
++    preSubmitMaterials(dir);
++    const reply = "1. 对得上\n2. 一致\n\n**通过**\n";
++    assert.equal(await prepareAndRecord(dir, reply), 0);
++    assert.equal(out.at(-1), "审核 pre-submit：通过（reviews/pre-submit-S01-v1.md）");
++    assert.equal(readFileSync(join(dir, "reviews", "pre-submit-S01-v1.md"), "utf8"), reply);
++    const rec = JSON.parse(readFileSync(join(dir, "reviews", "pre-submit-S01-v1.json"), "utf8"));
++    assert.deepEqual(Object.keys(rec), ["kind", "film", "shot", "verdict", "at", "files"]);
++    assert.equal(rec.kind, "pre-submit");
++    assert.equal(rec.film, FILM);
++    assert.equal(rec.shot, "S01");
++    assert.equal(rec.verdict, "pass");
++    assert.ok(!Number.isNaN(Date.parse(rec.at)));
++    const meta = JSON.parse(readFileSync(join(dir, "reviews", "pre-submit-S01-v1.prompt.json"), "utf8"));
++    assert.deepEqual(rec.files, meta.files);
++  });
++});
++
++test("record：不通过退出 1；连续两轮得到 -v1 和 -v2，名字不互相干扰", async () => {
++  await withFilm(async (dir, out) => {
++    preSubmitMaterials(dir);
++    assert.equal(await prepareAndRecord(dir, "首帧多了个水壶\n不通过"), 1);
++    assert.equal(out.at(-1), "审核 pre-submit：不通过（reviews/pre-submit-S01-v1.md）");
++    assert.equal(await prepareAndRecord(dir, "通过"), 0);
++    assert.equal(out.at(-1), "审核 pre-submit：通过（reviews/pre-submit-S01-v2.md）");
++    assert.deepEqual(reviewFiles(dir), [
++      "pre-submit-S01-v1.json",
++      "pre-submit-S01-v1.md",
++      "pre-submit-S01-v1.prompt.json",
++      "pre-submit-S01-v1.prompt.md",
++      "pre-submit-S01-v2.json",
++      "pre-submit-S01-v2.md",
++      "pre-submit-S01-v2.prompt.json",
++      "pre-submit-S01-v2.prompt.md",
++    ]);
++    const meta2 = JSON.parse(readFileSync(join(dir, "reviews", "pre-submit-S01-v2.prompt.json"), "utf8"));
++    assert.equal(meta2.n, 2);
++  });
++});
++
++test("版本号：只有 .prompt.md 时下一轮也是 v2（不被 .prompt.md 名字迷惑）", async () => {
++  await withFilm(async (dir) => {
++    put(dir, "story/shots-v1.md", "S01 猫看鱼");
++    assert.equal(await main(["prepare", "story", FILM]), 0);
++    assert.equal(await main(["prepare", "story", FILM]), 0);
++    assert.deepEqual(reviewFiles(dir), [
++      "story-v1.prompt.json",
++      "story-v1.prompt.md",
++      "story-v2.prompt.json",
++      "story-v2.prompt.md",
++    ]);
++    const meta = JSON.parse(readFileSync(join(dir, "reviews", "story-v2.prompt.json"), "utf8"));
++    assert.equal(meta.shot, null);
++  });
++});
++
++test("record：prepare 和 record 之间提示词文件被改了一个字 → 退出 3，不写记录", async () => {
++  await withFilm(async (dir, out) => {
++    preSubmitMaterials(dir);
++    assert.equal(await main(["prepare", "pre-submit", FILM, "--shot", "S01"]), 0);
++    appendFileSync(join(dir, "shots", "S01", "prompt-v2.txt"), "字");
++    const replyPath = put(dir, "tmp/reply.txt", "通过");
++    const code = await main([
++      "record", FILM, "--prompt", join(dir, "reviews", "pre-submit-S01-v1.prompt.md"), "--reply", replyPath,
++    ]);
++    assert.equal(code, 3);
++    assert.equal(out.at(-1), "审核期间文件变了：shots/S01/prompt-v2.txt");
++    assert.deepEqual(reviewFiles(dir), ["pre-submit-S01-v1.prompt.json", "pre-submit-S01-v1.prompt.md"]);
++  });
++});
++
++test("record：提示词文件不在本片 reviews/ 下或不是 .prompt.md 时退出 2", async () => {
++  await withFilm(async (dir) => {
++    const replyPath = put(dir, "tmp/reply.txt", "通过");
++    const elsewhere = put(dir, "tmp/x-v1.prompt.md", "x");
++    put(dir, "tmp/x-v1.prompt.json", "{}");
++    assert.equal(await main(["record", FILM, "--prompt", elsewhere, "--reply", replyPath]), 2);
++    assert.equal(await main(["record", FILM, "--prompt", join(dir, "reviews", "nope-v1.prompt.md"), "--reply", replyPath]), 2);
++    assert.equal(await main(["record", FILM, "--reply", replyPath]), 2);
++  });
++});
++
++test("集成：record 一份 pre-submit 通过之后，buildQuote 能对这个镜头报价", async () => {
++  await withFilm(async (dir) => {
++    preSubmitMaterials(dir);
++    assert.throws(() => buildQuote(FILM, ["S01"]), /还没有通过提交前审核/);
++    assert.equal(await prepareAndRecord(dir, "通过"), 0);
++    const q = buildQuote(FILM, ["S01"]);
++    assert.equal(q.shots[0].shot, "S01");
++    assert.equal(q.shots[0].reviewHash, sha256File(join(dir, "reviews", "pre-submit-S01-v1.json")));
++  });
++});

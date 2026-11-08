@@ -1,0 +1,1276 @@
+# Review package: 0f42f0e..HEAD
+
+## Commits
+be9a612 feat: 导演 Skill 与方法论参考资料
+
+## Files changed
+ .claude/skills/film-director/SKILL.md              | 158 +++++++++++++++
+ .claude/skills/film-director/references/gates.md   | 218 +++++++++++++++++++++
+ .../skills/film-director/references/pitfalls.md    |  30 +++
+ .../film-director/references/seven-part-prompt.md  |  26 +++
+ .../film-director/references/stages/0-setup.md     |  37 ++++
+ .../film-director/references/stages/1-story.md     |  66 +++++++
+ .../film-director/references/stages/2-board.md     |  90 +++++++++
+ .../film-director/references/stages/3-style.md     |  43 ++++
+ .../film-director/references/stages/4-keyframes.md |  92 +++++++++
+ .../film-director/references/stages/5-prompts.md   |  69 +++++++
+ .../film-director/references/stages/6-generate.md  |  68 +++++++
+ .../film-director/references/stages/7-post.md      |  84 ++++++++
+ .../film-director/references/stages/8-wrap.md      |  27 +++
+ tests/skill.test.ts                                | 161 +++++++++++++++
+ 14 files changed, 1169 insertions(+)
+
+## Diff
+diff --git a/.claude/skills/film-director/SKILL.md b/.claude/skills/film-director/SKILL.md
+new file mode 100644
+index 0000000..8b881d6
+--- /dev/null
++++ b/.claude/skills/film-director/SKILL.md
+@@ -0,0 +1,158 @@
++---
++name: film-director
++description: 当本人说"开一支新片""做一支短片""拍个短片：……"或"继续做《片名》"时使用。你在这个桌面 Code 会话里当 AI 短片的总导演：从一句想法做到 1080p 成片，写故事、分镜、全部提示词，调 Codex 画图、经 seedance.ts 出片、用代码做后期；每个关口在对话里问本人，花钱前必须报价并拿到本人的"批准 Q<n>"。
++---
++
++# 总导演
++
++## 你是谁
++
++你当这支短片的总导演，全程负责，本人只在这个对话里和你沟通。
++
++分工（方法论原文）：
++
++- 你：写故事和分镜，写所有提示词，调用其他模型，抽帧放大检查每张图和每段视频，用 ffmpeg 和 Python 写代码做后期。
++- Codex（画师）：画设定图、样帧和每个镜头的首尾帧。你不自己画。——只能经 `scripts/codex-image.ts` 调。
++- Seedance（动画师）：把首尾帧变成几秒钟的视频。——只能经 `scripts/seedance.ts` 调。
++- 审核：你用 Agent 工具开的全新只读子 agent，只挑错，不改文件（见下文"审核怎么做"）。
++- 监督：`films/<片名>/requirements.md`。本人说过的每句话都记在这里；每份审核清单的最后一项都会对照它。
++- 本人：选方向、确认画风、批准花钱、看动态、听声音。
++
++工作目录是本项目根目录，所有命令都从这里运行；每支片子的文件都在 `films/<片名>/` 下。
++
++## 总原则和 7 条规矩（方法论原文）
++
++总原则：把错误挡在花钱之前。文字里能发现的错，不留到图上；图上能发现的错，不留到视频上。
++
++规矩：
++1. 我确认故事前，不画任何图。
++2. 我确认画风前，不画正式镜头。
++3. 提交视频生成前，另开一个 agent 审核提示词和图片的每个细节，它只挑错，不改文件。通过后报价，我同意才提交。
++4. 视频有问题，先想能不能用代码修，修不了才重拍，只拍这一镜。
++5. 新版本存新文件，不覆盖、不删除旧文件。
++6. 你看不到真正的动态，也听不到声音。没看过、没听过的东西，要明确告诉我。
++7. 不充值，不买额度。接口返回欠费就停，把已有的片段先粗剪给我看。
++
++（规矩里的"我"是本人。）
++
++## 开新片
++
++1. 和本人确认片名（中文、英文、数字、`_`、`-`，1–40 个字）和一句话想法。
++2. 运行 `node scripts/new-film.ts <片名> "<想法>" --no-emit`。一定带 `--no-emit`。
++3. 退出 0 → 打开 `references/stages/0-setup.md` 开始做；退出 1 → 这个片名已经有了，问本人是继续做那支，还是换个片名。
++
++## 继续做
++
++本人说"继续做《片名》"（或会话中断后重新开始）时：
++
++1. 读 `films/<片名>/state.json` 和 `films/<片名>/requirements.md`，再看当前阶段已有的产物（`ls` 对应目录）。
++2. 打开当前阶段的手册（见文末阶段索引），从还没做完的那一步接着做；已经完成的阶段不重做。
++3. 如果有 `films/<片名>/.submit.lock`：不要删它，把文件内容原样告诉本人，等本人处理。
++4. 如果 `state.shots` 里有镜头的 `status` 是 `generating`：先按"等出片"在后台运行 `wait`。
++5. 如果 `state.gates` 里有关口是 `asked`：上次问了还没答，按 `references/gates.md` 重新问一次。
++
++## 每一步怎么做
++
++- 只做当前阶段还没做完的部分，不跳阶段，不提前画图。
++- 到了关口，按 `references/gates.md` 用 AskUserQuestion 问本人，问题和选项照写；问之前把 `state.gates.<关口>` 改成 `"asked"`，问完就停下等回答。AskUserQuestion 用不了时，在对话里用同样的问题和编号选项问，然后停下。
++- 本人的每次回答（包括自由文字、在"其他"里写的话、平时聊天里提的要求）都追加进 `requirements.md`，一行一条，注明时间和关口编号，原话照抄：
++  `- 2026-11-07 14:03 [G1] 选了"故事定了"；补充："结尾再安静一点"`
++  时间用 `date "+%Y-%m-%d %H:%M"` 取。不是关口时的要求写 `[对话]`。然后更新 `state.gates`：本人同意的写 `"approved"`，不同意或要改的写 `"rejected"`（改完再问时重新写 `"asked"`）。
++- `state.json` 是唯一可以原地改的文件，改之前先重新读一遍（脚本也会改它），改完保持合法 JSON。你只改 `stage`、`settings`、`gates`、`shots` 里的 `seconds`/`status`；`spentCNY` 和 `shots.*.clip` 由脚本写，不要手改。
++- 其他产物一律新建：同名产物用 `-v<n>`，n 取现有最大编号 + 1。用 Write 写文件之前先 `ls` 确认这个文件还不存在。
++- 每画完一张图、每出一段视频，都要自己打开看（图用 Read 打开，视频先用 `frames.py extract` 抽帧再看），放大看细节。
++
++## 审核怎么做
++
++审核只给清单和资料文件，不给对话和你的结论。每次审核都是一个全新的子 agent。
++
++1. 运行 `node scripts/review.ts prepare <类型> <片名> [--shot S01]`。类型是 `story`、`keyframe-plan`、`keyframes`、`pre-submit`、`final`；中间三种要带 `--shot`，另外两种不带。退出 0 时它打印 `reviews/<类型>[-<镜头>]-v<n>.prompt.md` 的绝对路径。
++2. 用 Bash 的 `cat` 读出这个 `.prompt.md` 的全文（不要用 Read，Read 会带行号）。用 Agent 工具开一个新的子 agent：`subagent_type: "Explore"`，`description` 写"审核 <类型> <镜头>"，`prompt` 就是这个文件的全文，原样粘贴，一个字都不加：不附对话内容、不附你的看法、不写文件路径让它自己去读（`reviews/` 下有旧的审核结论，不能让它看到）。
++3. 把子 agent 的最后回复原文（不删不改）用 Write 存成同一目录下的 `reviews/<类型>[-<镜头>]-v<n>.reply.md`（n 和 prompt.md 的一样）。
++4. 运行 `node scripts/review.ts record <片名> --prompt <prompt.md 绝对路径> --reply <reply.md 路径>`。
++   - 退出 0：通过。
++   - 退出 1：不通过。按回复逐条改，改出的文件存新版本，再从第 1 步审一轮。
++   - 退出 3：审核期间资料变了，这一轮作废，从第 1 步重来。
++   - 退出 2：看输出，多半是路径写错了或这一轮已经记过。
++5. 同一项审核（同一类型、同一镜头）连续 3 次"不通过"：停下，把三次的主要问题告诉本人，问怎么改（`references/gates.md` 的"审核卡住"一节）。
++
++## 等出片
++
++`seedance.ts submit` 退出 0 后，用 Bash 的 `run_in_background: true` 运行 `node scripts/seedance.ts wait <片名>`，然后等它结束的通知。不要手动反复运行 `poll`，也不要 `sleep` 轮询。同一支片子同时只跑一个 `wait`。等的时候可以做不花钱的事（比如写别的镜头的提示词），收到通知后按 `references/stages/6-generate.md` 处理。
++
++## 命令速查
++
++所有命令都从项目根目录运行。Python 一律用 `.venv/Scripts/python`；ffmpeg 由脚本自己找（PATH 或 winget 安装位置，环境变量 `FFMPEG`/`FFPROBE` 可以指定）。
++
++| 命令 | 退出码 |
++|---|---|
++| `node scripts/new-film.ts <片名> "<想法>" --no-emit` | 0 已开新片；1 片子已存在（什么都没动）；2 用法不对或片名不合法 |
++| `node scripts/review.ts prepare <类型> <片名> [--shot S01]` | 0 打印 prompt.md 绝对路径；2 用法不对、该带或不该带 `--shot`；3 缺资料（输出列出缺的文件模式） |
++| `node scripts/review.ts record <片名> --prompt <prompt.md> --reply <reply.md>` | 0 通过；1 不通过；2 用法不对、文件读不到或这一轮已记录过；3 审核期间资料被改过 |
++| `node scripts/codex-image.ts <片名> --kind style\|sheet\|first\|last --out <基名> --prompt <提示词文件> [--ref <图>]...` | 0 已出图（输出里有"比例不是 16:9"就要裁）；1 阶段闸门不放行（G1/G3/G3b 没批准）；2 参数不对、找不到片子/提示词/参考图；3 Codex 没出图（看最后几行原因）；5 Codex 额度用完 |
++| `node scripts/quote.ts <片名> --shots S01,S02 [--model mini\|2.5]` | 0 报价成功，打印一句话（报价号、秒数、金额、已花、余额）；2 出错（镜头没过提交前审核、没设预算等）或超预算（输出以"超预算："开头，报价文件写了但不能批准） |
++| `node scripts/approve.ts <片名> Q<n> --said '<本人回答原文>'` | 0 已记下批准；1 报价不存在/超预算/原文里没有"批准 Q<n>"/已经批准过；2 用法不对 |
++| `node scripts/seedance.ts submit <片名> --quote Q<n>` | 0 全部提交；1 被闸门拒绝（逐条列原因）、没设 Key、另一个提交的锁还在、网关拒绝、或结果不明（可能已扣费，不要重发）；2 用法不对；4 欠费，其余镜头没提交；7 网关已建任务但没记上账，锁保留 |
++| `node scripts/seedance.ts wait <片名> [--interval 30] [--timeout 3600]` | 0 全部结束并已下载（个别镜头"生成失败"也是 0，看输出）；1 有片段下载出错或没设 Key；2 用法不对；6 超时，已出好的已下载，再 `wait` 一次 |
++| `node scripts/seedance.ts poll <片名> [--json]` | 0 都结束了或没有待查任务；10 还有没结束的；1 没设 Key；2 用法不对（只在本人要看进度时用一次） |
++| `node scripts/seedance.ts fetch <片名>` | 0 下载完成；1 有下载出错或没设 Key；2 用法不对（`wait` 已经包含下载，一般不用） |
++| `.venv/Scripts/python scripts/py/sketch.py <分镜JSON> <输出png>` | 0 已画总表；2 JSON 不对或输出已存在 |
++| `.venv/Scripts/python scripts/py/grayscale.py <输入png> <输出png> [--board <分镜JSON>] [--min-contrast 0.25]` | 0 明暗对比都够；1 有色块对比不够（逐条列出）；2 参数不对或输出已存在 |
++| `.venv/Scripts/python scripts/py/frames.py extract <视频> <输出目录> [--every 0.5 \| --around 2.0,5.0 [--n 3]]` | 0 已抽帧；1 ffmpeg 出错；2 参数不对或有重名帧（一张都没写） |
++| `.venv/Scripts/python scripts/py/frames.py crop169 <输入png> <输出png>` | 0 已居中裁成 16:9；2 输入不对或输出已存在 |
++| `.venv/Scripts/python scripts/py/frames.py compare <首帧> <尾帧> <输出png>` | 0 已画叠加图和差值图，打印差异最大的 5 格；2 输入不对或输出已存在 |
++| `.venv/Scripts/python scripts/py/post.py concat <清单txt> <输出mp4>` | 0 已拼接（每段按 BT.601 解码、lanczos 放大到 1080p、轻微锐化、交付标 BT.709）；1 ffmpeg 出错；2 参数不对或输出已存在 |
++| `.venv/Scripts/python scripts/py/post.py grade <输入> <输出> [--sat 1.0] [--bright 0.0]` | 0 已调彩度亮度；1 ffmpeg 出错；2 参数不对或输出已存在（只用于拼接之后的成片） |
++| `.venv/Scripts/python scripts/py/post.py trim <输入> <输出> --start 秒 --end 秒` | 0 已剪；1 ffmpeg 出错；2 参数不对或输出已存在（只用于拼接之后的成片） |
++
++Python 工具的退出码约定：0 成功；1 检查没通过或 ffmpeg 出错；2 参数或输入有问题、输出已存在（原文件不动）。
++
++## 出错处理
++
++| 情况 | 怎么做 |
++|---|---|
++| `codex-image.ts` 退出 5（额度用完） | 告诉本人 Codex 额度用完了，停止画图（别的图也不画），等本人说继续再画。不买额度。 |
++| `codex-image.ts` 退出 3（没出图） | 看输出最后几行。有 HTTP 400"requires a newer version of Codex"→ Codex CLI 太旧，把 `codex --version` 的结果告诉本人，请本人运行 `npm install -g @openai/codex@latest` 升级，你不自己装；其他原因 → 重画一次，还不行就告诉本人。 |
++| 出的图比例不对 | 用 `frames.py crop169` 裁切存新版本，不重画。 |
++| 同一项审核连续 3 次"不通过" | 停下，问本人怎么改（`references/gates.md` 的"审核卡住"）。 |
++| Seedance 任务失败（`wait` 输出"<镜头> 生成失败：<原因>"） | 读原因。参数问题（规格、时长、图片格式、内容审核）→ 改完提示词或首尾帧，重新审核、重新报价。临时错误（超时、网关出错）→ 先请本人到网关任务日志或账单确认那次失败没扣费；确认没扣，才同样内容重新报价重拍一次（G4 里写明是重试）；扣了或确认不了 → 当成新的一次重新报价，先问本人。 |
++| `submit` 退出 1 且输出"提交结果不明" | 可能已经扣费、已经按可能扣费记账。不要重发，把输出原样告诉本人，请本人到网关任务日志核对。 |
++| `submit` 退出 1 且输出"另一个提交正在进行" | 不要删锁文件。把输出原样告诉本人，等本人处理。 |
++| `submit` 退出 4（欠费） | 停止提交，用已有片段粗剪一版给本人看（`references/stages/6-generate.md`），告诉本人欠费了，停下。不充值，不重试。 |
++| `submit` 退出 7（建了任务没记上账） | 立刻停下，把命令打印的全部内容原样告诉本人（任务号、金额、应补记的那一行）。不要自己补记 `spend.jsonl`，不要删 `.submit.lock`，不要重新提交。 |
++| `wait` 退出 6（超时） | 已出好的已下载；再在后台运行一次 `wait`。 |
++| 视频有问题 | 先剪掉 → 再用代码修 → 都不行才改提示词或首尾帧后重拍，只拍这一镜；旧片段保留（`references/stages/6-generate.md`）。 |
++| 缺工具或缺 Key | 告诉本人缺什么、怎么装或怎么设，不自动安装（`references/stages/0-setup.md`）。 |
++
++## 硬性禁止
++
++- 不手动调用视频接口（不用 curl、fetch 或自己写代码请求网关），只能经过 `scripts/seedance.ts`。
++- 不手写或改动 `spend.jsonl`、`fetched.jsonl`、`approvals/`、`quotes/`、`reviews/*.json`、`.submit.lock`；这些只由脚本写。
++- `approve.ts` 只在本人这一轮的回答里明确选了"批准 Q<n>"（或亲口写了"批准 Q<n>"）之后才运行，`--said` 填本人回答的原文，不改写、不补字。回答含糊（"可以""行吧"）就再问一次 G4，不运行。旧的回答不能拿来批准新的报价。
++- 不覆盖、不删除文件（`state.json` 原地更新、`requirements.md` 追加除外）。
++- 不打印 `SEEDANCE_API_KEY`，不把它写进任何文件或命令行；只检查它有没有设。
++- 不充值、不买额度（Codex 和网关都是）。
++- 没看过动态、没听过声音的东西要明说。你只能看抽出来的帧，看不到真正的动态，也听不到声音。
++- 不改脚本、配置和本 Skill 来绕过闸门；闸门拦下来就照它说的原因改产物。
++
++## 阶段索引
++
++| `state.stage` | 手册 | 关口 |
++|---|---|---|
++| `setup` | `references/stages/0-setup.md` | G0 |
++| `story` | `references/stages/1-story.md` | G1 |
++| `board` | `references/stages/2-board.md` | G2 |
++| `style` | `references/stages/3-style.md` | G3、G3b |
++| `keyframes` | `references/stages/4-keyframes.md` | 改图时问 |
++| `prompts` | `references/stages/5-prompts.md` | G4 |
++| `generate` | `references/stages/6-generate.md` | G4（重拍）、G5 |
++| `post` | `references/stages/7-post.md` | G6 |
++| `wrap` | `references/stages/8-wrap.md` | — |
++| `done` | 片子已做完；本人要改就从对应阶段的手册接着做 | — |
++
++参考资料：
++
++- `references/gates.md`：每个关口的问题、选项、附带文件、选完做什么。
++- `references/seven-part-prompt.md`：七段式视频提示词模板。
++- `references/pitfalls.md`：模型易错表。
++- `references/reviews/`：五份审核清单（`story.md`、`keyframe-plan.md`、`keyframes.md`、`pre-submit.md`、`final.md`），由 `review.ts prepare` 自动拼进提示词，不用手动发。
+diff --git a/.claude/skills/film-director/references/gates.md b/.claude/skills/film-director/references/gates.md
+new file mode 100644
+index 0000000..76e6f03
+--- /dev/null
++++ b/.claude/skills/film-director/references/gates.md
+@@ -0,0 +1,218 @@
++# 关口
++
++每个关口都用 AskUserQuestion 问本人，问题和选项照下面写（`<…>` 换成实际内容）。AskUserQuestion 会自动带一个"其他"让本人写自由文字，不用自己加。问之前把 `state.gates.<关口>` 改成 `"asked"`；问完就停下等回答。
++
++本人回答后，统一做三件事：
++
++1. 把回答原文追加进 `films/<片名>/requirements.md`：`- <时间> [<关口>] 选了"<选项>"；补充："<自由文字>"`。
++2. 改 `state.gates.<关口>`：同意写 `"approved"`，要改或不同意写 `"rejected"`。
++3. 按下面"选完之后"做。
++
++本人在"其他"里写了自由文字：先照字面理解；拿不准是同意还是要改，就按"要改"处理，再问一次。
++
++附带文件一律写成可以点开的完整路径（`E:/05_AI/04_Claude短片流/films/<片名>/...`），写在问题前面的说明文字里。
++
++---
++
++## G0：开工设置
++
++**什么时候问**：`0-setup.md` 的环境检查做完以后。检查结果（缺什么、怎么装）写在问题前面的说明里。
++
++**附带文件**：`films/<片名>/brief.md`
++
++**问题和选项**（一次问 4 个问题）：
++
++1. 问题：`片子多长？` 选项：`15 秒`、`30 秒`、`60 秒`
++2. 问题：`画幅用哪种？` 选项：`16:9 横屏（现有工具都按这个做）`、`9:16 竖屏（草图、裁切、放大都要另写代码）`
++3. 问题：`总预算多少？（只算视频生成，金额是估算，以账单为准）` 选项：`¥10`、`¥30`、`¥60`
++4. 问题：`要配乐和字幕吗？` 选项：`都不要`、`只要字幕`、`要配乐（之后告诉我歌名、时长、BPM）`、`配乐和字幕都要（之后告诉我歌名、时长、BPM）`
++
++**选完之后**：
++
++- 写进 `state.settings`：`seconds`（数字）、`aspect`（`"16:9"` 或 `"9:16"`）、`budgetCNY`（数字）、`subtitles`（true/false）、`music`（不配乐为 null）。
++- 选了配乐：再在对话里问歌名、时长、BPM，以及有没有参考片；回答写进 `requirements.md`，`settings.music` 写成 `"<歌名>，<时长> 秒，<BPM> BPM"`。
++- 选了 9:16：告诉本人 `sketch.py`、`frames.py crop169`、`post.py concat` 都是按 16:9 写的，这几步要现写代码代替，再确认一次。
++- 全部有了 → `gates.G0 = "approved"`，`stage = "story"`，打开 `stages/1-story.md`。
++
++---
++
++## G1：定故事
++
++**什么时候问**：逐镜故事写好、`story` 审核"通过"以后。
++
++**附带文件**：`films/<片名>/story/shots-v<n>.md`（审过的那一版）、`films/<片名>/reviews/story-v<n>.md`（审核回复）
++
++**问题**：`逐镜故事审核通过了（一句话主题：<主题句>）。故事就这样定吗？`
++
++**选项**：`故事定了`、`还要改（在其他里写改哪里）`
++
++**选完之后**：
++
++- `故事定了` → `gates.G1 = "approved"`，`stage = "board"`，打开 `stages/2-board.md`。从这时起才能画图。
++- `还要改` 或自由文字 → `gates.G1 = "rejected"`，按本人说的改，存新版本 `story/shots-v<n+1>.md`，重新审 `story`，通过后再问 G1。
++
++---
++
++## G2：定分镜和配色
++
++**什么时候问**：分镜表、配色和色表、色块草图总表、黑白检查都做完以后。
++
++**附带文件**：`films/<片名>/board/storyboard-v<n>.md`、`films/<片名>/board/palette-v<n>.md`、`films/<片名>/board/sketch-v<n>.png`、`films/<片名>/board/sketch-v<n>-gray.png`
++
++**问题**：`分镜 <镜头数> 镜、共 <片中总秒数> 秒、生成计费共 <计费总秒数> 秒（按 mini 估约 ¥<金额>）。分镜和配色这样定吗？`
++
++**选项**：`分镜和配色定了`、`分镜要改（在其他里写）`、`配色要改（在其他里写）`
++
++**选完之后**：
++
++- `分镜和配色定了` → `gates.G2 = "approved"`，确认 `state.shots` 已按分镜写好，`stage = "style"`，打开 `stages/3-style.md`。
++- 要改 → `gates.G2 = "rejected"`，改出新版本（分镜、配色、草图都存新文件），重做黑白检查，再问 G2。
++
++---
++
++## G3：定画风
++
++**什么时候问**：2–3 张样帧画好、你自己看过以后。
++
++**附带文件**：`films/<片名>/style/look-v<n>.png`（每张都列出来，标上第几张），以及每张用的提示词文件。
++
++**问题**：`这是 <张数> 张样帧，每张一种画风：<每张一句话描述>。用哪一张的画风？`
++
++**选项**：`用第 1 张`、`用第 2 张`、`用第 3 张`（只有 2 张就去掉第三项）、`都不行，重画（在其他里写想要的方向）`
++
++**选完之后**：
++
++- 选了某一张 → 把那张的画风写成一句话，追加进 `requirements.md`（`[G3] 画风：……`，后面所有提示词的【画风】段都用这句），`gates.G3 = "approved"`，接着画设定图（`stages/3-style.md` 第二部分）。
++- 都不行 → `gates.G3 = "rejected"`，按本人说的方向重写提示词，再画 2–3 张新版本，再问 G3。
++
++---
++
++## G3b：定设定图
++
++**什么时候问**：每个角色和固定道具的设定图都画好、你自己逐张看过以后。
++
++**附带文件**：`films/<片名>/style/sheet-<角色>-v<n>.png`（每个角色、道具各一张最新版），每张写明固定特征和位置（比如"纹身在左手臂"）。
++
++**问题**：`设定图画好了：<每张一句话：谁、固定特征在哪>。这样定吗？`
++
++**选项**：`设定图定了`、`要改（在其他里写哪张、哪里）`
++
++**选完之后**：
++
++- `设定图定了` → `gates.G3b = "approved"`，`stage = "keyframes"`，打开 `stages/4-keyframes.md`。
++- 要改 → `gates.G3b = "rejected"`，只重画要改的那张（新版本），再问 G3b。
++
++---
++
++## G4：报价（每批一次）
++
++**什么时候问**：这一批每个镜头的 `pre-submit` 审核都"通过"、`quote.ts` 退出 0 以后。每份报价问一次，一份报价只对应一次提交。
++
++**附带文件**：`films/<片名>/quotes/Q<n>.json`，以及这批每个镜头的 `shots/<镜头>/prompt-v<n>.txt`、`first-v<n>.png`、`last-v<n>.png`、`reviews/pre-submit-<镜头>-v<n>.md`。
++
++**问题前面的说明**（照 `quote.ts` 的输出和 `quotes/Q<n>.json` 写）：
++
++```
++报价 Q<n>
++镜头：S01（4.6 秒 → 计费 6 秒）、S02（……）
++模型：<mini 或 2.5>（<模型 id>，¥<单价>/秒，720p）
++合计：约 ¥<合计>　已花：¥<已花>　预算余额：¥<余额>
++金额是估算，以账单为准。网关提交时按每镜上限预扣（mini 每镜 15 秒），出片后按实际结算退差额，账户余额要够预扣。
++<是重拍或重试的话，写明是哪一镜、为什么、改了什么>
++```
++
++**问题**：`报价 Q<n>：<镜头数> 镜 <计费秒数> 秒，约 ¥<合计>。提交吗？`
++
++**选项**（固定写法，`<n>` 和金额照报价填）：
++
++- `批准 Q<n>（¥合计）`，例如 `批准 Q3（¥1.8）`
++- `改用 2.5 重新报价`——只有当本次报价用的是 mini、并且 `config/pricing.json` 里 `models["2.5"].firstLastFrame` 是 `true`（2.5 支持首尾帧）时才出现。现在的配置里它是 `false`，所以这一项不出现，只问 `批准 Q<n>（¥合计）` 和 `先不拍` 两项。检查命令：
++  `node -e "const p=JSON.parse(require('fs').readFileSync('config/pricing.json','utf8'));console.log(p.models['2.5'].firstLastFrame===true?'支持':'不支持')"`
++- `先不拍`
++
++**选完之后**：
++
++- `批准 Q<n>（¥合计）`（或本人在自由文字里明确写了"批准 Q<n>"）→ 在这一轮里运行
++  `node scripts/approve.ts <片名> Q<n> --said '<本人回答原文>'`
++  （原文用单引号包住；原文里有单引号就写成 `'\''`）。退出 0 → `gates.G4 = "approved"` → 运行 `node scripts/seedance.ts submit <片名> --quote Q<n>`，按 `stages/5-prompts.md` 处理结果。退出 1 → 把原因告诉本人，不提交。
++- `改用 2.5 重新报价` → 运行 `node scripts/quote.ts <片名> --shots <同样的镜头> --model 2.5`，用新报价号重新问 G4。旧报价留着，不批准它。
++- `先不拍` → `gates.G4 = "rejected"`，不运行 `approve.ts`，问本人想先改什么，等本人说。
++- 回答含糊（"可以""行""先这样"）→ 不算批准，原样再问一次 G4。
++
++**超预算时**（`quote.ts` 退出 2，输出以"超预算："开头）：不问 G4，改问：
++
++- 问题：`这批要 ¥<合计>，加上已花 ¥<已花> 超过总预算 ¥<预算>。怎么办？`
++- 选项：`少拍几镜（在其他里写拍哪几镜）`、`先不拍`
++- 本人在自由文字里提高预算 → 改 `settings.budgetCNY`、记进 `requirements.md`，再运行 `quote.ts` 出新报价、问 G4。
++
++---
++
++## G5：看动态、听声音
++
++**什么时候问**：这一批（或全部）片段下载完、你逐镜抽帧看过、能剪的剪掉、能用代码修的修好以后。
++
++**附带文件**：每个镜头最新的 `films/<片名>/shots/<镜头>/clip-v<n>.mp4`（修过的话附修好的版本），以及你抽帧看到的问题清单。
++
++**问题前面的说明**必须写明：
++
++```
++我没看过动态、没听过声音。我只看了抽出来的帧：<每镜一句看到了什么、发现了什么、怎么处理的>。
++动作顺不顺、有没有抖、声音能不能用，要你看过、听过才算数。
++```
++
++**问题**：`请看一遍这些片段、听一下声音。可以进后期吗？`
++
++**选项**：`都可以，进后期`、`有镜头要处理（在其他里写哪一镜、哪里不对）`、`声音不用，后期另配`
++
++**选完之后**：
++
++- `都可以，进后期` → 这批镜头的 `status` 改成 `"accepted"`；全部镜头都 accepted → `gates.G5 = "approved"`，`stage = "post"`，打开 `stages/7-post.md`。还有没拍的镜头 → 回 `stages/5-prompts.md` 报下一批。
++- `有镜头要处理` → `gates.G5 = "rejected"`，按 `stages/6-generate.md` 的"有问题怎么办"处理那一镜（先剪、再代码修、最后才重拍，重拍要重新审核、重新报价、问 G4），处理完再问 G5。
++- `声音不用，后期另配` → 记进 `requirements.md`；后期不用片段自带的声音，其余同"都可以"。
++
++---
++
++## G6：成片验收
++
++**什么时候问**：`out/final-v<n>.mp4` 做好、切点前后 3 帧抽查过、`final` 审核做完以后。
++
++**附带文件**：`films/<片名>/out/final-v<n>.mp4`、`films/<片名>/reviews/final-v<n>.md`（审核回复，写明有哪些"硬伤"和"小问题"）
++
++**问题前面的说明**写明：我没看过动态、没听过声音；审核也只看了帧，查不了动态手感和声音。
++
++**问题**：`成片做好了（<时长> 秒，1920×1080）。验收吗？`
++
++**选项**：`验收`、`还要改（在其他里写时间和问题）`
++
++**选完之后**：
++
++- `验收` → `gates.G6 = "approved"`，`stage = "wrap"`，打开 `stages/8-wrap.md`。
++- `还要改` → `gates.G6 = "rejected"`，能在后期改的出新版本 `out/final-v<n+1>.mp4` 重新审 `final`；要重拍的回 `stages/6-generate.md`。改完再问 G6。
++
++---
++
++## 改图：首尾帧要改时（不编号）
++
++**什么时候问**：`keyframes` 审核或你自己按 8 项检查，发现某个镜头的首帧或尾帧要改的时候（方法论："有问题就告诉我是哪张图、哪里不对，我同意了再改"）。`requirements.md` 里关口编号写 `[改图-<镜头>]`。
++
++**附带文件**：要改的图、`reviews/keyframes-<镜头>-v<n>.md`、`frames.py compare` 的对比图。
++
++**问题**：`<镜头> 的 <首帧/尾帧> 有这些问题：<逐条：哪张图、哪里不对、打算怎么改>。照这样改吗？`
++
++**选项**：`照这样改`、`我来说怎么改（在其他里写）`
++
++**选完之后**：按本人的意思改（只改一小块时把改好的那一块贴回原图），存新版本，重新自检、重新审 `keyframes`。
++
++---
++
++## 审核卡住：同一项连续 3 次不通过（不编号）
++
++`requirements.md` 里关口编号写 `[审核卡住-<类型>-<镜头>]`。
++
++**附带文件**：三次的 `reviews/<类型>[-<镜头>]-v<n>.md`。
++
++**问题**：`<类型> <镜头> 的审核连续 3 次没通过，主要卡在：<逐条>。怎么改？`
++
++**选项**：`按审核说的改`、`换个拍法（在其他里写）`、`这一镜先不做`
++
++**选完之后**：照本人的意思改，再审；`这一镜先不做` → 这一镜 `status` 写 `"skipped"`，告诉本人片长会变短。
+diff --git a/.claude/skills/film-director/references/pitfalls.md b/.claude/skills/film-director/references/pitfalls.md
+new file mode 100644
+index 0000000..ba29ff0
+--- /dev/null
++++ b/.claude/skills/film-director/references/pitfalls.md
+@@ -0,0 +1,30 @@
++# 模型易错表
++
++方法论 PDF 第 12 页的表（20 行），写视频提示词时逐行对照，`pre-submit` 审核前自己先查一遍。
++
++原图右栏被截断（PDF 内嵌的图片本身就不完整）。可见部分照抄；被截掉、按上下文补全的文字放在 `〔补：……〕` 里，只是推测，不是原文。
++
++| # | 模型容易犯的错 | 应该怎么〔补：写〕 | 在本流程里怎么做 |
++|---|---|---|---|
++| 1 | 一群人同时做同一个动作 | 写清楚谁先谁后："老爸第一个……过一〔补：会儿妈妈跟着……最〕后……"，首帧也不要摆同一个姿势 | 【逐秒】按先后写；首帧里每人姿势不同（`keyframes` 第 3 项） |
++| 2 | 本来该风做的事，人自己动手做了，比如邮差用手掀开邮包 | 写清楚原因，再写上"两只手从头到尾都〔补：握着车把，不碰邮包"〕 | 【逐秒】写动作的原因和手放在哪 |
++| 3 | 云、月亮、植物长出眼睛和嘴巴 | 不要写"卡通云"，要写"蓬松的灰白色〔补：云团，下面有淡淡的阴〕影"，动作也只写它怎么移动 | 写物体的样子，不用"卡通"这类会拟人的词 |
++| 4 | 人往反方向走 | 方向要按画面来写："朝画面左边走，跨〔补：出画面左边"〕 | 方向一律写画面左右（分镜表也这样写） |
++| 5 | 一句话有两种意思，比如写"窗户后面的老人"，结果车里冒出了人 | 写得更具体："左上角石头房子的窗口里〔补：站着一位老人"〕 | 位置写到画面哪一块、哪个东西里 |
++| 6 | 东西的数量变了 | 把数量直接写出来："只有一封黄信封，〔补：从头到尾都只有这一封"〕 | 【人物】【约束】里把数量写死 |
++| 7 | 写"不要怎么样"经常没用，比如写了"壶嘴不出水"还是出水 | 尽量改成正面的说法："画面里一直只有〔补：首帧里的这些东西"〕 | 用【约束】的正面说法代替"不要……" |
++| 8 | 模型会自己联想道具的用法，比如壶总是出水 | 干脆不让这个道具出现在有动作的镜头里〔补：（原图在这里被截断，后面可能还有字，看不到）〕 | 分镜阶段就把这类道具移出有动作的镜头 |
++| 9 | 东西凭空出现 | 只用首帧里已经有的东西 | 动作要用的东西首帧就画上（`keyframes` 第 1 项） |
++| 10 | 东西突然飞走或者瞬间移动 | 写清楚它是怎么动的："顺着后脑勺往后〔补：滑下去，落到背后"〕 | 【逐秒】写运动路径 |
++| 11 | 雨、帽子、纹身拍着拍着就没了 | 首帧和尾帧都画上 | 首帧、尾帧都画上，提示词【人物】里也写 |
++| 12 | 闪电画得太写实 | 写"云里闪一下白光"，再把开头剪掉 | 后期剪掉开头几帧 |
++| 13 | 一个镜头动作太多就乱了 | 每个镜头只写一两个主要动作 | 分镜和【逐秒】都只放一两个主要动作 |
++| 14 | 动作的时间和写的不一样 | 写的时间只能算大概，多留一点时间，后〔补：期再剪〕 | 计费秒数留余量，后期剪 |
++| 15 | 镜头推得没有写的那么明显 | 后期让 Claude 用代码再推一点 | `7-post.md` 拼接前用 crop+scale 补推 |
++| 16 | 人的嘴自己在动 | 写明"人物不说话"，还动就用代码修 | 【声音】写"人物不说话"；还动就代码修 |
++| 17 | 写了"没有音乐"还是混进了音乐（Seedance 2.5） | 片段自带的声音不用，后期另外加 | 2.5 的片段声音不用 |
++| 18 | 结尾几帧突然跳到尾帧的样子（Seedance 2.5） | 后期选一张没问题的画面，后面都停在这〔补：一张〕 | 拼接前停帧（`7-post.md`） |
++| 19 | 第一张画面特别锐（Seedance 2.5） | 直接把这一张去掉 | 拼接前剪掉第一帧 |
++| 20 | 视频越到后面越暗越冷（Seedance 2.0 mini） | 每条视频都按它自己的首帧把颜色调回来 | 拼接前逐段按首帧调回颜色（`7-post.md`） |
++
++说明：第 17–19 行是 Seedance 2.5 的问题。本项目现在的网关上 2.5 不支持首尾帧，暂时用不上；以后能用了再对照。
+diff --git a/.claude/skills/film-director/references/seven-part-prompt.md b/.claude/skills/film-director/references/seven-part-prompt.md
+new file mode 100644
+index 0000000..c208b45
+--- /dev/null
++++ b/.claude/skills/film-director/references/seven-part-prompt.md
+@@ -0,0 +1,26 @@
++# 七段式视频提示词模板
++
++方法论第 5 步（PDF 第 11 页）原文模板。每个镜头一份，存成 `films/<片名>/shots/<镜头>/prompt-v<n>.txt`，文件里只放提示词本身。
++
++```
++【画风】[一句话写画风，比如：干净的现代 2D 手绘动画，平涂色块，线条利落，没有颗粒和纹理]。整段的画风、颜色、人物设计与首帧和尾帧完全一致。
++【镜头】整段 [X] 秒，[景别]，[机位]，[运镜；不动就写“不推不拉不摇，不切镜”]。
++【构图与配色】[人和东西在画面哪里，墙和光是什么颜色。要和首帧对得上]
++【人物】[每个人的长相、衣服、固定道具，写死]
++【逐秒】
++0–0.2 秒：画面完全静止，和首帧一模一样。
++[每一段：谁做什么，表情怎么变，手放在哪、不能碰什么，往画面哪边]
++最后 0.3 秒：所有人完全停住，画面与尾帧完全一致。
++【声音】只有 [看得见原因的声音]。人物不说话。
++【约束】画面里一直只有首帧这几个人和这些东西，脸和身形全程不变，一镜到底。画面干干净净，没有文字、字幕、水印。
++```
++
++## 填写说明（本项目的约定）
++
++- 【画风】用 G3 定下、记在 `requirements.md` 里的那句，全片每镜一字不差。
++- 【镜头】的 X 写这一镜的计费秒数（分镜表"生成秒数"，最少 4 秒，mini 最多 15 秒），景别、机位、运镜照分镜表。
++- 【构图与配色】位置写画面左右和大致比例（"人的眼睛在画面左起约 38%"），颜色用 `board/palette-v<n>.md` 色表里这一场的颜色，和首帧对得上。
++- 【人物】照抄设定图的固定特征，固定东西写明位置（"纹身在左手臂上"）；数量写死（"只有一封黄信封"）。
++- 【逐秒】每一段写清楚谁先谁后、动作的原因、手放在哪；方向按画面写（"朝画面左边走"）；每镜只写一两个主要动作；时间只是大概，多留一点余量。
++- 【声音】只写看得见原因的声音；不配对白时写"人物不说话"。
++- 写完对照 `pitfalls.md` 逐行查一遍，再送 `pre-submit` 审核。
+diff --git a/.claude/skills/film-director/references/stages/0-setup.md b/.claude/skills/film-director/references/stages/0-setup.md
+new file mode 100644
+index 0000000..0bf789b
+--- /dev/null
++++ b/.claude/skills/film-director/references/stages/0-setup.md
+@@ -0,0 +1,37 @@
++# 阶段 0：开工准备（`stage = "setup"`）
++
++方法论："开工前先做两件事：1. 问我：片长、画幅、总预算、要不要配乐和字幕。2. 检查 Codex、ffmpeg、Python 和〔视频接口的 Key〕能不能用，缺什么告诉我。"（原文写的是火山方舟的 Key；本项目走第三方网关，Key 是 `SEEDANCE_API_KEY`。）
++
++## 做什么
++
++### 1. 检查环境
++
++逐条运行，记下结果。缺什么只告诉本人缺什么、怎么装或怎么设，不自动安装、不自动升级。
++
++| 检查 | 命令 | 正常的样子 |
++|---|---|---|
++| Node | `node --version` | v24 或更高 |
++| Codex | `codex --version` | 打印版本号（把版本号告诉本人）。命令找不到就是没装 |
++| Python 和 Pillow | `.venv/Scripts/python -c "import PIL; print(PIL.__version__)"` | 打印 Pillow 版本 |
++| ffmpeg 和 ffprobe | `.venv/Scripts/python -c "import sys; sys.path.insert(0, 'scripts/py'); import common, subprocess; [print(subprocess.run([b, '-version'], capture_output=True, text=True).stdout.splitlines()[0]) for b in (common.ffmpeg_bin(), common.ffprobe_bin())]"` | 两行版本号（脚本按环境变量 `FFMPEG`/`FFPROBE`、PATH、winget 安装位置的顺序找） |
++| 视频接口的 Key | `node -e "console.log(process.env.SEEDANCE_API_KEY?.trim() ? '有' : '没有')"` | 只输出"有"或"没有"。绝不打印 Key 本身 |
++| 视频网关地址 | `node -e "console.log(process.env.SEEDANCE_BASE_URL || '没设，用默认网关 https://newapi.dragon3api.com')"` | 正式拍片应是默认网关；如果是 `127.0.0.1`/`localhost`，那是试跑用的假网关，告诉本人 |
++
++说明：
++
++- Key 显示"没有"：请本人自己把 `SEEDANCE_API_KEY` 设进 Windows 用户环境变量，然后重启 Claude 桌面端（已开的会话读不到新设的环境变量）。不要让本人把 Key 发到对话里。
++- Codex 没装或没登录：告诉本人。故事和分镜阶段不画图，可以先往下做；到了画样帧之前必须解决。
++- 排查：如果以后画图失败（`codex-image.ts` 退出 3），输出里有 HTTP 400"requires a newer version of Codex"，说明 Codex CLI 版本太旧。把 `codex --version` 的结果告诉本人，请本人升级：`npm install -g @openai/codex@latest`。你不自己装。
++
++### 2. 问 G0
++
++按 `../gates.md` 的 G0 问本人片长、画幅、总预算、配乐和字幕；环境检查结果写在问题前面的说明里。
++
++## 产物
++
++- `state.json` 的 `settings`（由 G0 的回答写入）
++- `requirements.md` 追加 G0 的回答
++
++## 完成后 `state` 怎么改
++
++G0 的回答都有了：`settings` 写好，`gates.G0 = "approved"`，`stage = "story"`，打开 `1-story.md`。
+diff --git a/.claude/skills/film-director/references/stages/1-story.md b/.claude/skills/film-director/references/stages/1-story.md
+new file mode 100644
+index 0000000..a1a8659
+--- /dev/null
++++ b/.claude/skills/film-director/references/stages/1-story.md
+@@ -0,0 +1,66 @@
++# 阶段 1：从一个想法到完整剧情（`stage = "story"`）
++
++规矩 1：本人确认故事前，不画任何图（`codex-image.ts` 在 G1 没批准时会拒绝）。
++
++## 做什么
++
++### 1. 和本人聊，把想法完善成完整故事
++
++材料：`brief.md`（一句话想法）、`requirements.md`、`state.settings`（片长、配歌）。
++
++照方法论的提示词做（原文）：
++
++> 我想做的片子：[一句话，或者我的初步剧情]。片长：[秒]。
++> 配歌：[歌名、时长、BPM；不配歌就删掉]。
++> 参考片：[有就写，没有就删掉]。
++>
++> 先帮我把这个想法完善成一个完整的故事。有不清楚的地方就问我，我们一起聊，等我确认了再往下写。
++> 故事结构首选片段式，因为每个镜头之间都不用接戏，最稳。连贯式最容易穿帮，除非我要求，否则不要用。
++
++- 每一稿存 `story/story-v<n>.md`（新稿新文件）：一句话主题、故事梗概、结构（片段式/连贯式）。
++- 每一轮都问本人（AskUserQuestion，给 2–4 个具体方向或问题，本人可以在"其他"里自由回答），回答照 `../gates.md` 开头的做法记进 `requirements.md`，关口编号写 `[故事]`。
++- 故事结构首选片段式；本人没要求连贯式就不用。
++- 本人说故事大方向可以了，再进入第 2 步。
++
++### 2. 展开成逐镜头故事
++
++照方法论的要求写（原文）：
++
++> 故事确定以后，展开成逐镜头的故事，要满足下面这些要求：
++> 1. 符合现实逻辑。每个转折都按现实追问一遍：为什么会这样？东西从哪来？够得着吗？现实里真会这样吗？
++> 2. 能用一句话说清想表达什么。先把这句话写出来，说不出来就说明故事还要改。
++> 3. 开头就要抓人。最抓眼球的画面放在前面，写清楚第几秒出现什么。
++> 4. 旁人的反应要像真人。每个包袱或者转折都分 3 段写：问题 → 主角怎么解决 → 旁人什么反应。反应要有先后，不能几个人同一秒做同一个动作。细节也要真实，比如人吃惊时身体会往后缩。
++> 5. 要让 AI 拍得出来。避开这些弱点：人物交叉、手拿小东西、文字、镜子和倒影、左右不对称的特征、一个镜头里换光、一个人连做三个动作、俯拍看不到脸、配角太多。
++>
++> 如果配歌，转折对副歌，关键动作对重拍。
++
++存成 `story/shots-v<n>.md`，格式：
++
++- 第一行：一句话主题。
++- 每镜一节：`## S01（0–4 秒）`，写这一镜发生什么、谁在画面里、第几秒出现什么。镜头号一律 `S01`、`S02`……（两位或三位数字）。
++- 只写故事本身，不写你和本人聊了什么、不写你的判断（审核只看这个文件）。
++
++每镜时长先粗估：网关每段视频至少按 4 秒计费、mini 最长 15 秒，详细算法见 `2-board.md`。
++
++### 3. 审核 `story`
++
++按 SKILL.md"审核怎么做"：`node scripts/review.ts prepare story <片名>`（不带 `--shot`），资料只有最新的 `story/shots-v<n>.md`（和本人要求）。
++
++- 不通过：按回复逐条改，存 `story/shots-v<n+1>.md`，再审。
++- 连续 3 次不通过：按 `../gates.md`"审核卡住"问本人。
++- 通过：问 G1。
++
++### 4. 问 G1
++
++按 `../gates.md` 的 G1 问。
++
++## 产物
++
++- `story/story-v<n>.md`：完整故事的各稿
++- `story/shots-v<n>.md`：逐镜头故事（`story` 审核的资料）
++- `reviews/story-v<n>.prompt.md`、`.reply.md`、`.md`、`.json`：审核（`.md`/`.json` 由 `review.ts record` 写）
++
++## 完成后 `state` 怎么改
++
++G1 选了"故事定了"：`gates.G1 = "approved"`，`stage = "board"`，打开 `2-board.md`。
+diff --git a/.claude/skills/film-director/references/stages/2-board.md b/.claude/skills/film-director/references/stages/2-board.md
+new file mode 100644
+index 0000000..f18cabd
+--- /dev/null
++++ b/.claude/skills/film-director/references/stages/2-board.md
+@@ -0,0 +1,90 @@
++# 阶段 2：分镜——定镜头语言、构图和配色（`stage = "board"`）
++
++方法论：这是整个前期最重要的一步，构图和配色决定片子的质量。有参考片就先逐帧看参考片，把机位、进出画比例量出来再模仿；没有就按下面的要求自己构思。每个镜头都要写清：景别、机位、运镜、谁往哪走（写画面左右）、靠什么表情推进、怎么转到下一镜。
++
++## 做什么
++
++### 1. 写分镜表 `board/storyboard-v<n>.md`
++
++照方法论的提示词（原文）：
++
++> 把定稿的故事写成分镜表。每个镜头一行，写清楚：片中时间（配歌就按小节算）、生成秒数（片中时长向上取整，尽量多留 0.5 秒）、景别、机位、运镜、谁往哪走（写画面的左右）、靠什么表情推进、这个镜头是什么在动、怎么转到下一个镜头。
++>
++> 如果有参考片，先逐帧看参考片，把机位、进出画比例这些都量出来，然后学习模仿。没有参考片就按下面的要求自己构思。
++>
++> 要求：
++> 1. 每个镜头换角度。全片平视正面最多两次，其余用俯拍、仰拍、从背后、过肩、透过东西拍。
++> 2. 画面里要一直有东西在动。大多数镜头都要有人或者东西走进画面，或者走出画面。人不走动的镜头，就让别的东西动起来，比如飘过去的一张纸，或者身后走过的路人。固定机位更要让人在画面里走动，比如从远处走到近处。
++> 3. 不要连着好几个镜头都是一样大小的画面，全身、半身、脸部特写要换着来。
++> 4. 每个镜头都要写清楚是什么在动：摄影机、焦点、光线、镜头前面飘过的东西，或者人物的小动作，至少要有一样。也不要一直动，该动的地方动，该静的地方静。
++> 5. 镜头运动要有理由：跟着一个东西走，慢慢推近给特写，或者从近处慢慢拉远。
++> 6. 每一秒截图都要好看。人的头或者眼睛落在画面从左往右大约 38% 或者 62% 的位置，不要放在正中间。
++
++表格列（每镜一行，镜头号沿用 `story/shots-v<n>.md` 的 `S01`、`S02`……）：
++
++| 镜头 | 片中时间 | 生成秒数 | 景别 | 机位 | 运镜 | 谁往哪走（画面左右） | 靠什么表情推进 | 这个镜头是什么在动 | 怎么转到下一个镜头 |
++|---|---|---|---|---|---|---|---|---|---|
++
++写完自己对一遍 6 条要求：数一数平视正面有几次；有没有连着同样景别；每镜"什么在动"是不是至少一样；运镜有没有理由。
++
++### 2. 算时长：计费秒数
++
++`quote.ts` 按 `state.shots.<镜头>.seconds`（片中时长）算计费秒数：向上取整；取整后余量不足（含等于）0.5 秒再加 1 秒；**最少按 4 秒计费**（网关下限）。mini 一段最长 15 秒，超了网关会拒绝。
++
++| 片中时长 | 计费（生成）秒数 |
++|---|---|
++| 0.1–3.4 秒 | 4 |
++| 3.5–4.4 秒 | 5 |
++| 4.5–5.4 秒 | 6 |
++| …… | …… |
++| 13.5–14.4 秒 | 15（mini 上限，片中时长不要超过 14.4 秒） |
++
++设计时长时要想到这个下限：片中只用 2 秒的镜头也按 4 秒付钱，所以要么把这一镜设计成 3–3.4 秒用足，要么在分镜里写明"生成 4 秒、后期剪出最好的 2 秒"。"生成秒数"一列写计费秒数，它也是七段式提示词【镜头】里的"整段 X 秒"。
++
++### 3. 配色和色表 `board/palette-v<n>.md`
++
++方法论（原文）：
++
++> 配色要单独设计，在画第一张图之前定好。我想要的配色：[我的喜好；没想好就给我几个方案选]。
++> 把每一场用什么颜色单独列成一张色表。
++
++- 本人没说喜好：先给本人 2–3 个配色方案选（AskUserQuestion，`requirements.md` 关口编号写 `[配色]`）。
++- 文件写：全片主色、强调色（后期调色时受保护）、肤色；再列色表——每一场一行：场、镜头范围、背景色、人物主色、强调色、光的颜色，都写色值（如 `#1d2a3a`）。这份文件是 `pre-submit` 审核的"配色规则"。
++
++### 4. 色块草图和黑白检查
++
++方法论（原文）：
++
++> 最后用代码给每个镜头画一张 1920×1080 的色块草图，标出 38% 和 62% 的位置和主要的东西，拼成一张总表给我确认。再把草图转成黑白看一遍，如果人和背景区分不开，就说明明暗对比不明显，要重新调配色。
++
++1. 写 `board/sketch-v<n>.json`（格式见 `scripts/py/sketch.py` 开头）：每镜一项，`bg` 是背景色，`blocks` 是主要的人和东西（x/y/w/h 是占画面的比例，人的头或眼睛放在 0.38 或 0.62 附近），颜色取自色表。
++2. `.venv/Scripts/python scripts/py/sketch.py films/<片名>/board/sketch-v<n>.json films/<片名>/board/sketch-v<n>.png`
++3. `.venv/Scripts/python scripts/py/grayscale.py films/<片名>/board/sketch-v<n>.png films/<片名>/board/sketch-v<n>-gray.png --board films/<片名>/board/sketch-v<n>.json`
++   - 退出 0：明暗对比都够。
++   - 退出 1：输出里列出的色块和背景分不开 → 改配色（新版本 `palette-v<n+1>.md`、`sketch-v<n+1>.json`），重画重查。
++4. 用 Read 打开总表和黑白图自己看一遍。
++
++### 5. 写 `state.shots`
++
++按分镜表给每镜写一项（键是镜头号，`seconds` 是片中时长，不是计费秒数）：
++
++```json
++"shots": {
++  "S01": { "seconds": 3.4, "status": "planned", "clip": null },
++  "S02": { "seconds": 4.6, "status": "planned", "clip": null }
++}
++```
++
++### 6. 问 G2
++
++按 `../gates.md` 的 G2 问，附分镜表、色表、草图总表和黑白图。
++
++## 产物
++
++- `board/storyboard-v<n>.md`：分镜表（`keyframe-plan`、`pre-submit` 审核的资料）
++- `board/palette-v<n>.md`：配色和色表（`pre-submit` 审核的资料）
++- `board/sketch-v<n>.json`、`board/sketch-v<n>.png`、`board/sketch-v<n>-gray.png`：色块草图和黑白图
++
++## 完成后 `state` 怎么改
++
++`state.shots` 写好；G2 选了"分镜和配色定了"：`gates.G2 = "approved"`，`stage = "style"`，打开 `3-style.md`。
+diff --git a/.claude/skills/film-director/references/stages/3-style.md b/.claude/skills/film-director/references/stages/3-style.md
+new file mode 100644
+index 0000000..3955488
+--- /dev/null
++++ b/.claude/skills/film-director/references/stages/3-style.md
+@@ -0,0 +1,43 @@
++# 阶段 3：定画风，画设定图（`stage = "style"`）
++
++规矩 2：本人确认画风前，不画正式镜头（`codex-image.ts` 在 G3 没批准时只允许 `--kind style`，G3b 没批准时不允许画首尾帧）。
++
++方法论：画风就是这部动画的绘画风格，比如宫崎骏的动画就是手绘、柔和、颜色温暖。有参考图最好。这一步由你写提示词，Codex 负责画，本人负责看是不是想要的风格。画风定下来以后，再给每个角色和固定的道具画一张设定图：一般是这个人的正面、侧面和几个表情，相当于把长相定下来。人物身上固定的东西一定要写清楚位置，比如纹身在左手臂上，不然后面每张图的纹身位置都可能不一样。
++
++## 画图的共同做法
++
++- 一次只画一张，等它出完、自己看过再画下一张；不要同时跑多个 `codex-image.ts`。
++- 每张图的提示词先写成文件（新文件，`-prompt-v<n>.txt`），再运行命令；`codex-image.ts` 会自动在开头加上 "Use your image generation tool to create exactly ONE image. Do not run shell commands."，不用自己写。
++- 提示词里写清：画风、色值（取自 `board/palette-v<n>.md`）、构图（人的头或眼睛在画面左起 38% 或 62%）、16:9 横幅；不要在画面里写字。
++- 出图后用 Read 打开放大看。输出里有"比例不是 16:9"的样帧，用 `frames.py crop169` 裁成新版本，不重画。
++- 退出 5（额度用完）→ 告诉本人，停止画图，等本人说继续。退出 3 → 看原因（有"requires a newer version of Codex"就请本人升级 Codex，见 `0-setup.md` 的排查），其他原因重画一次，还不行告诉本人。
++
++## 第一部分：样帧 → G3
++
++1. 先问本人有没有参考图或想要的画风（AskUserQuestion 给 2–3 个画风方向，`requirements.md` 关口编号写 `[画风]`）。本人给了参考图，就用 `--ref` 带上。
++2. 选分镜里最有代表性的一镜，用 2–3 种画风各画一张样帧：
++   - 写 `style/look-prompt-v<n>.txt`
++   - `node scripts/codex-image.ts <片名> --kind style --out style/look --prompt films/<片名>/style/look-prompt-v<n>.txt [--ref <参考图>]`
++   - 出图存成 `style/look-v<n>.png`（编号由脚本取）。
++3. 自己看过每张，按 `../gates.md` 的 G3 问本人选哪张。
++
++## 第二部分：设定图 → G3b
++
++G3 批准后，给每个角色和每个固定道具各画一张设定图：
++
++1. 写 `style/sheet-<角色>-prompt-v<n>.txt`：用 G3 定下的画风；正面、侧面和几个表情放在同一张图里；衣服、发型、固定道具写死；固定特征写明位置（"纹身在左手臂上""帽檐朝左"）；左右不对称的特征尽量少。
++2. `node scripts/codex-image.ts <片名> --kind sheet --out style/sheet-<角色> --prompt films/<片名>/style/sheet-<角色>-prompt-v<n>.txt --ref films/<片名>/style/look-v<n>.png`
++   - `<角色>` 用中文或英文名字（如 `sheet-邮差`、`sheet-黄信封`），不要带空格；出图存成 `style/sheet-<角色>-v<n>.png`。`keyframes` 和 `pre-submit` 审核会自动取每个角色最新的一张。
++3. 自己逐张放大看：固定特征的位置对不对、正面侧面是不是同一个人。
++4. 把每个角色的固定特征（含位置）追加进 `requirements.md`（`[设定] 邮差：……`），后面的提示词【人物】段照抄。
++5. 按 `../gates.md` 的 G3b 问本人。
++
++## 产物
++
++- `style/look-prompt-v<n>.txt`、`style/look-v<n>.png`：样帧和提示词
++- `style/sheet-<角色>-prompt-v<n>.txt`、`style/sheet-<角色>-v<n>.png`：设定图和提示词（设定图是 `keyframes`、`pre-submit` 审核的资料）
++
++## 完成后 `state` 怎么改
++
++- G3 批准：`gates.G3 = "approved"`（stage 不变，接着画设定图）。
++- G3b 批准：`gates.G3b = "approved"`，`stage = "keyframes"`，打开 `4-keyframes.md`。
+diff --git a/.claude/skills/film-director/references/stages/4-keyframes.md b/.claude/skills/film-director/references/stages/4-keyframes.md
+new file mode 100644
+index 0000000..b62661a
+--- /dev/null
++++ b/.claude/skills/film-director/references/stages/4-keyframes.md
+@@ -0,0 +1,92 @@
++# 阶段 4：出每个镜头的首尾帧（`stage = "keyframes"`）
++
++方法论：首尾帧就是这个镜头的第一张画面和最后一张画面，这是降低抽卡率最关键的一步。只靠文字生成视频，模型很容易出逻辑错误；雨、帽子、纹身这些只写在文字里根本不行，经常拍着拍着就没了，所以这些小物件必须在首帧和尾帧都画上。
++
++画图的共同做法（一次一张、提示词先写文件、额度用完就停）见 `3-style.md`。
++
++## 画的顺序（方法论原文）
++
++> - 不要一上来就开画，让AI把每个镜头的首帧画什么、尾帧画什么、中间发生什么都写出来，让审核agent审核过了再画，这样能省很多 Codex 额度。
++> - 先画内容最多的那张，一般就是尾帧，然后在尾帧上改出首帧，这样可以保证两张图的摄影机位置和构图是一样的。
++> - 画同一个地点、同一个机位的镜头，直接在前一张图上改，不需要重新画，codex支持图片的局部改动。
++> - 如果镜头的运动设定是要慢慢推近，那尾帧可以直接把首帧裁一块然后放大。因为如果首帧和尾帧的构图完全一样，那这个镜头就等于不动，再生成视频的时候就没有慢慢推进的效果。
++> - Codex 出的图不一定正好是 16:9，提交给 Seedance 之前要检查一遍，有问题要提前让ai裁好，首帧和尾帧的尺寸也要保持一样。
++
++## 每个镜头做什么
++
++一镜一镜做；每镜做完（`keyframes` 审核通过）再做下一镜。
++
++### 1. 写首尾帧计划 `shots/<镜头>/plan-v<n>.md`
++
++写三段：首帧画什么、尾帧画什么、中间发生什么。按下面 8 项检查去写（动作要用的东西首帧就有、旁人的反应提前摆好……），写清左右、人数、道具数量、每个人的姿势和朝向。
++
++审核：`node scripts/review.ts prepare keyframe-plan <片名> --shot <镜头>`（资料是这份计划和 `board/storyboard-v<n>.md`），流程见 SKILL.md"审核怎么做"。不通过就改出 `plan-v<n+1>.md` 再审；通过了才画图。
++
++### 2. 画内容最多的那张（一般是尾帧）
++
++- 写 `shots/<镜头>/last-prompt-v<n>.txt`。
++- `node scripts/codex-image.ts <片名> --kind last --out shots/<镜头>/last --prompt films/<片名>/shots/<镜头>/last-prompt-v<n>.txt --ref films/<片名>/style/sheet-<角色>-v<n>.png --ref films/<片名>/style/look-v<n>.png`
++  （画面里有几个角色就带几张设定图；和前一镜同一地点同一机位时，改用前一镜的图做 `--ref`，提示词写"在这张图上改"。）
++- 出图存成 `shots/<镜头>/last-v<n>.png`。
++
++### 3. 在它上面改出另一张（一般是首帧）
++
++- 写 `shots/<镜头>/first-prompt-v<n>.txt`：写明"在这张图上改：摄影机位置、构图、背景、光线完全不变，只改……"。
++- `node scripts/codex-image.ts <片名> --kind first --out shots/<镜头>/first --prompt films/<片名>/shots/<镜头>/first-prompt-v<n>.txt --ref films/<片名>/shots/<镜头>/last-v<n>.png`
++- 推近镜头：先画内容最多的首帧（远景），尾帧不画，用代码从首帧裁一块放大（`s` 是保留的比例，如 0.8；`l`、`t` 是裁切框左上角的像素位置；`'xb'` 保证不覆盖已有文件）：
++  `.venv/Scripts/python -c "from PIL import Image; im=Image.open('films/<片名>/shots/<镜头>/first-v<n>.png').convert('RGB'); W,H=im.size; s=0.8; w,h=round(W*s),round(H*s); l,t=0,0; im.crop((l,t,l+w,t+h)).resize((W,H),Image.LANCZOS).save(open('films/<片名>/shots/<镜头>/last-v<m>.png','xb'),'PNG')"`
++
++### 4. 裁成 16:9、尺寸一致
++
++- 输出里有"比例不是 16:9"：`.venv/Scripts/python scripts/py/frames.py crop169 films/<片名>/shots/<镜头>/last-v<n>.png films/<片名>/shots/<镜头>/last-v<n+1>.png`（首帧同理）。只裁不重画。
++- 先裁尾帧再用裁好的尾帧改首帧，两张一般就一样大。确认尺寸：
++  `.venv/Scripts/python -c "from PIL import Image; print(Image.open('films/<片名>/shots/<镜头>/first-v<n>.png').size, Image.open('films/<片名>/shots/<镜头>/last-v<n>.png').size)"`
++  不一样就把其中一张用 LANCZOS 缩放到另一张的尺寸，存新版本。
++- 提交和审核都只认每种文件编号最大的那一版，所以裁好、修好的版本一定要是最新编号。
++
++### 5. 局部改动要贴回原图
++
++方法论：Codex 就算只改一小块，也会把整张图重新处理一遍。所以只改一小块时，要把改好的那一块贴回原图。
++
++改完先裁成和原图一样的尺寸，再把改动的那一块贴回原图，存成新版本（`box` 是改动区域的像素框）：
++
++`.venv/Scripts/python -c "from PIL import Image; a=Image.open('<原图>').convert('RGB'); b=Image.open('<改过的图>').convert('RGB').resize(a.size, Image.LANCZOS); box=(<左>,<上>,<右>,<下>); a.paste(b.crop(box), box[:2]); a.save(open('<新版本路径>','xb'),'PNG')"`
++
++贴完用 `frames.py compare` 对比原图和新图，确认只有那一块变了。
++
++### 6. 按 8 项逐张自检
++
++方法论原文（材料：首帧、尾帧、设定图、这个镜头的分镜）：
++
++> 1. 动作要用到的东西，首帧里必须有。比如后面要拿杯子，首帧里就要看得到杯子，否则杯子会凭空冒出来。
++> 2. 别人的反应要提前摆好。一段视频就是一个镜头，没法中途切过去拍别人，所以首帧里要安排好：一个人在前面做事，另一个人在后面，脸朝着镜头。
++> 3. 很多人一起出现时，不能摆同一个姿势，不然模型会让所有人同时动。
++> 4. 给动作留出空间。东西要落到、飘到的地方要提前空出来，人的头顶也要留点空。
++> 5. 风往哪边吹要统一，不能围巾往左飘，床单却往右飘。
++> 6. 缩小到手机大小看一遍，远处的人太小、看不清就要改。
++> 7. 放大看有没有多余的东西，比如多一个水壶，或者多一条奇怪的细线。
++> 8. 把首帧和尾帧叠在一起看有没有错位。不该变的地方两张图必须一样。比如墙的颜色不一样，视频里墙就会慢慢变色；杯子大了一点，视频里杯子就会慢慢变大。
++
++辅助：
++
++- 第 8 项：`.venv/Scripts/python scripts/py/frames.py compare films/<片名>/shots/<镜头>/first-v<n>.png films/<片名>/shots/<镜头>/last-v<n>.png films/<片名>/shots/<镜头>/compare-v<k>.png`，打开对比图看；打印出的差异最大的 5 格应该都在"本来就该变"的地方。
++- 第 6 项：缩到手机大小再看：`.venv/Scripts/python -c "from PIL import Image; im=Image.open('films/<片名>/shots/<镜头>/first-v<n>.png'); im.resize((360, round(360*im.height/im.width)), Image.LANCZOS).save(open('films/<片名>/shots/<镜头>/phone-v<k>.png','xb'),'PNG')"`
++- 第 7 项：用 Read 打开原图，逐块看。
++
++### 7. 审核 `keyframes`
++
++`node scripts/review.ts prepare keyframes <片名> --shot <镜头>`（资料是最新的首帧、尾帧、全部设定图和计划）。
++
++- 自检或审核发现要改图：按 `../gates.md`"改图"一节先问本人，本人同意了再改；改完存新版本，重新自检、重新审核。
++- 通过：这一镜 `state.shots.<镜头>.status = "keyframes"`，做下一镜。
++
++## 产物（每个镜头）
++
++- `shots/<镜头>/plan-v<n>.md`：首尾帧计划（`keyframe-plan`、`keyframes` 审核的资料）
++- `shots/<镜头>/first-prompt-v<n>.txt`、`shots/<镜头>/last-prompt-v<n>.txt`：画图提示词
++- `shots/<镜头>/first-v<n>.png`、`shots/<镜头>/last-v<n>.png`：首帧、尾帧（编号最大的一版是正式版）
++- `shots/<镜头>/compare-v<k>.png`、`shots/<镜头>/phone-v<k>.png`：自检图
++
++## 完成后 `state` 怎么改
++
++全部镜头的 `status` 都是 `"keyframes"`：`stage = "prompts"`，打开 `5-prompts.md`。
+diff --git a/.claude/skills/film-director/references/stages/5-prompts.md b/.claude/skills/film-director/references/stages/5-prompts.md
+new file mode 100644
+index 0000000..5536612
+--- /dev/null
++++ b/.claude/skills/film-director/references/stages/5-prompts.md
+@@ -0,0 +1,69 @@
++# 阶段 5：写视频提示词，提交前审核，报价（`stage = "prompts"`）
++
++方法论：出了问题要先怀疑提示词，再怀疑模型，无论如何都要把提示词写精细。固定用七段式，把每一秒发生什么都写下来。每条视频提交之前，都要另开一个 agent 把提示词和图片的每个细节核对一遍，它审核通过之后才能提交（规矩 3）。
++
++## 每个镜头做什么
++
++### 1. 写七段式提示词 `shots/<镜头>/prompt-v<n>.txt`
++
++- 模板照 `../seven-part-prompt.md`，一段都不少。
++- 【画风】用 G3 定下的那句画风；【人物】照抄设定图的固定特征（含位置）；【构图与配色】要和首帧对得上，颜色取自 `board/palette-v<n>.md`。
++- 【镜头】里的"整段 X 秒"写这一镜的计费秒数（分镜表"生成秒数"一列，最少 4 秒）。
++- 写完对照 `../pitfalls.md` 逐行查一遍：谁先谁后写了吗？方向按画面左右写了吗？数量写死了吗？有没有"不要怎么样"的说法可以改成正面说法？
++- 文件里只放提示词本身，不加标题和说明（`seedance.ts` 会把整个文件当提示词发出去）。
++
++### 2. 提交前审核 `pre-submit`（必须通过）
++
++`node scripts/review.ts prepare pre-submit <片名> --shot <镜头>`。资料是最新的提示词、首帧、尾帧、全部设定图、分镜表、配色。流程见 SKILL.md"审核怎么做"。
++
++- 不通过：按回复改（改提示词就存 `prompt-v<n+1>.txt`；改图就回 `4-keyframes.md`，先按 `../gates.md`"改图"问本人），再审。
++- 通过：这一镜 `status = "ready"`。
++- 审核通过之后不要再改这一镜的提示词、首帧、尾帧；改了就要重新审（`seedance.ts submit` 会核对哈希，拦下来）。
++
++## 报价和提交
++
++### 3. 先拿一两个最难的镜头试拍
++
++方法论的省钱做法：用 720p 生成（脚本固定 720p），后期再放大到 1080p；不用专门拍测试片，直接拍第一个正式镜头，能用就赚了；新的做法先拿一两个最难的镜头试一下，行得通再全部提交。
++
++所以第一批只报 1–2 个最难的、已经 `ready` 的镜头；它们出片、检查过没问题（`6-generate.md`）再报其余镜头。模型默认用 mini（`state.settings.model`）；2.5 现在不支持首尾帧，不能用。
++
++### 4. 报价
++
++`node scripts/quote.ts <片名> --shots S01,S02`
++
++- 退出 0：打印"报价 Q<n>：……"，报价写在 `quotes/Q<n>.json`。按 `../gates.md` 的 G4 问本人（说明里写镜头、秒数、模型、合计、已花、余额、"金额是估算，以账单为准"）。
++- 退出 2、输出以"超预算："开头：按 `../gates.md` G4 的"超预算时"问本人。
++- 退出 2、其他原因（"还没有通过提交前审核""还没有设总预算"……）：照原因补上再报价。
++
++### 5. 本人选了"批准"才运行 `approve.ts`
++
++只在本人这一轮的回答明确是 `批准 Q<n>（¥合计）`（或亲口写了"批准 Q<n>"）时：
++
++`node scripts/approve.ts <片名> Q<n> --said '<本人回答原文>'`
++
++- 退出 0：`gates.G4 = "approved"`，接着第 6 步。
++- 退出 1：把输出告诉本人，不提交。
++- 本人选了"先不拍"或回答含糊：不运行，按 `../gates.md` G4 处理。
++
++### 6. 提交
++
++`node scripts/seedance.ts submit <片名> --quote Q<n>`
++
++| 退出码 | 怎么做 |
++|---|---|
++| 0 | 全部提交了。`stage = "generate"`，按 SKILL.md"等出片"在后台运行 `node scripts/seedance.ts wait <片名>`，打开 `6-generate.md`。 |
++| 1 | 看输出。闸门原因（审核后改过文件、没有批准、超预算、已提交过……）→ 照原因改，需要时重新审核、重新报价、重新问 G4。"另一个提交正在进行" → 不删锁，把输出原样告诉本人。"提交结果不明" → 可能已扣费，不要重发，把输出原样告诉本人请他到网关任务日志核对。"网关拒绝了……没有建任务" → 读原因改参数，重新报价。输出"已提交 k 镜"且 k > 0 时，那几镜已在生成，照样在后台 `wait`。 |
++| 4 | 欠费：其余镜头没提交。按 `6-generate.md`"欠费"处理：粗剪已有片段，告诉本人，停下。 |
++| 7 | 已在网关建了任务但没记上账，锁保留。立刻停下，把命令打印的全部内容原样告诉本人；不补记、不删锁、不重新提交。 |
++
++## 产物
++
++- `shots/<镜头>/prompt-v<n>.txt`：七段式视频提示词（`pre-submit` 审核的资料，提交时发的就是编号最大的这一版）
++- `reviews/pre-submit-<镜头>-v<n>.*`：提交前审核
++- `quotes/Q<n>.json`（`quote.ts` 写）、`approvals/Q<n>.json`（`approve.ts` 写）、`spend.jsonl`（`seedance.ts` 写）——都不要手改
++
++## 完成后 `state` 怎么改
++
++- 每镜 `pre-submit` 通过：`shots.<镜头>.status = "ready"`。
++- 第一批 `submit` 退出 0：`stage = "generate"`（提交成功的镜头 `status` 由脚本改成 `"generating"`）。之后的批次在 `6-generate.md` 里照本文件第 4–6 步做。
+diff --git a/.claude/skills/film-director/references/stages/6-generate.md b/.claude/skills/film-director/references/stages/6-generate.md
+new file mode 100644
+index 0000000..43befec
+--- /dev/null
++++ b/.claude/skills/film-director/references/stages/6-generate.md
+@@ -0,0 +1,68 @@
++# 阶段 6：生成视频（`stage = "generate"`）
++
++## 做什么
++
++### 1. 在后台等出片
++
++`submit` 退出 0（或退出 1 但已提交了几镜）后，用 Bash 的 `run_in_background: true` 运行：
++
++`node scripts/seedance.ts wait <片名>`
++
++然后等完成通知，不要手动反复 `poll`，不要 `sleep` 轮询，同一支片子同时只跑一个 `wait`。等的时候可以做不花钱的事。收到通知后读输出：
++
++| 退出码 | 怎么做 |
++|---|---|
++| 0 | 全部结束。每镜一行："<镜头> 已下载：shots/<镜头>/clip-v<n>.mp4"或"<镜头> 生成失败：<原因>"。已下载的做第 2 步；失败的按 SKILL.md"出错处理"里"Seedance 任务失败"处理。 |
++| 6 | 超时：已出好的已下载，其余还在生成。再在后台运行一次 `wait`。 |
++| 1 | 有片段下载出错（或没设 Key）。没下载成功的任务下次 `wait` 会再下，再在后台运行一次；还不行就告诉本人。 |
++
++### 2. 逐镜抽帧放大检查
++
++视频你看不到动态，只能看帧：
++
++- 每 0.5 秒一帧：`.venv/Scripts/python scripts/py/frames.py extract films/<片名>/shots/<镜头>/clip-v<n>.mp4 films/<片名>/shots/<镜头>/clip-v<n>-frames --every 0.5`
++- 开头和结尾各 3 帧：`.venv/Scripts/python scripts/py/frames.py extract films/<片名>/shots/<镜头>/clip-v<n>.mp4 films/<片名>/shots/<镜头>/clip-v<n>-ends --around 0,<片段时长秒数> --n 3`（超过片尾会自动取最后一帧）
++- 用 Read 逐张打开放大看：和首帧、尾帧对得上吗？人数、道具数量变没变？脸变没变形？有没有凭空出现的东西、走反方向、嘴在动、越到后面越暗越冷？对照 `../pitfalls.md`。
++- 把看到的问题写进 `shots/<镜头>/check-v<n>.md`（看了哪些帧、发现什么、打算怎么处理）。
++
++### 3. 有问题怎么办（方法论原文）
++
++> 发现问题也不要马上重拍，因为重拍又得花钱，可以从下面几个方面看看能不能处理一下：
++> 1. 能不能剪掉？如果问题只出现在开头或者结尾那几帧，直接剪掉就行。
++> 2. 能不能用代码修？让 Claude 尝试一下写代码修，修不好再考虑重拍。
++> 3. 如果要重新拍就要先改提示词或者首尾帧图片，不然原样再拍一次大概率还是错的。重新拍完之后，旧片段也不要删。重拍的新片段不一定比旧的好，都留着，最后放在一起挑，都是花钱拍出来的，可以用就都用上。
++
++- 剪掉：在 `check-v<n>.md` 里记下要剪的时间段，到后期（`7-post.md`）拼接前剪。
++- 代码修：写 ffmpeg/Python 代码修，结果存到 `post/` 下的新文件（如 `post/S03-fix-v1.mkv`），不改原片段；做法见 `7-post.md`"拼接前的单段处理"。
++- 重拍：只拍这一镜。先改提示词（`prompt-v<n+1>.txt`）或首尾帧（回 `4-keyframes.md`，改图先问本人），重新审 `pre-submit`，再照 `5-prompts.md` 第 4–6 步报价、问 G4、批准、提交、后台 `wait`。G4 说明里写明是重拍、为什么、改了什么。旧片段保留，新片段是 `clip-v<n+1>.mp4`。
++- 声音：mini 自带的音效经常能直接用；2.5 就算写了"没有音乐"有时也会混进音乐，这种不要用，音效后期另外加。声音你听不到，交给本人在 G5 听。
++
++### 4. 剩下的镜头
++
++试拍的镜头行得通，就照 `5-prompts.md` 第 4–6 步给其余 `ready` 的镜头报价（可以一批），问 G4，批准后提交、后台 `wait`，回到本文件第 2 步。
++
++### 5. 问 G5
++
++所有镜头都有一版检查过、能剪的标好、能修的修好以后，按 `../gates.md` 的 G5 问本人，附每镜最新的片段（修过的附修好的版本）。说明里必须写"我没看过动态、没听过声音"。
++
++## 欠费（`submit` 退出 4）
++
++规矩 7：不充值，不买额度。接口返回欠费就停，把已有的片段先粗剪给本人看。
++
++1. 不再提交，不重试。
++2. 写清单 `post/rough-v<n>.txt`：按镜头顺序，每行一个已下载片段的路径（相对清单所在目录，如 `../shots/S01/clip-v1.mp4`）。
++3. `.venv/Scripts/python scripts/py/post.py concat films/<片名>/post/rough-v<n>.txt films/<片名>/out/rough-v<n>.mp4`
++4. 告诉本人：网关说余额或额度不足；已提交哪几镜、没提交哪几镜；已花多少（`quote.ts` 下次报价会显示，或看 `state.spentCNY`）；粗剪在 `out/rough-v<n>.mp4`；我没看过动态、没听过声音。然后停下，等本人说怎么办。
++
++## 产物
++
++- `shots/<镜头>/clip-v<n>.mp4`：片段（`seedance.ts` 下载，编号自动递增，旧片段保留）
++- `shots/<镜头>/clip-v<n>-frames/`、`shots/<镜头>/clip-v<n>-ends/`：抽出的帧
++- `shots/<镜头>/check-v<n>.md`：检查记录
++- `post/rough-v<n>.txt`、`out/rough-v<n>.mp4`：欠费时的粗剪
++
++## 完成后 `state` 怎么改
++
++- 下载后脚本把镜头 `status` 改成 `"generated"`（失败为 `"failed"`）、`clip` 写成片段路径。
++- G5 选"都可以"：这些镜头 `status = "accepted"`；全部 accepted → `gates.G5 = "approved"`，`stage = "post"`，打开 `7-post.md`。
++- 重拍的镜头：新提示词审核通过后 `status = "ready"`，提交后脚本改成 `"generating"`。
+diff --git a/.claude/skills/film-director/references/stages/7-post.md b/.claude/skills/film-director/references/stages/7-post.md
+new file mode 100644
+index 0000000..686e05c
+--- /dev/null
++++ b/.claude/skills/film-director/references/stages/7-post.md
+@@ -0,0 +1,84 @@
++# 阶段 7：拼接、转场、调色、放大（`stage = "post"`）
++
++方法论：片子是一段一段生成的，生成完要拼成完整视频，再加转场、调色、放大。全部用代码做。
++
++## 后期要求（方法论原文）
++
++> 用代码做后期：
++> 1. 转场：[哪一镜到哪一镜，用什么东西盖屏或带过去]。运动模糊切 8–16 份，半帧快门。
++> 2. 调色：按故事分段。只调彩度和亮度，不动色相，强调色受保护，肤色不变。不加颗粒、柔光、暗角。
++> 3. Seedance 的 mp4 按 BT.601 解码，中间文件用无损格式，交付标 BT.709。
++> 4. 放大：720p 用 lanczos 放大到 1080p，加轻微锐化。不用整段插帧。
++> 5. 按小节卡点：拍点只从原曲上测，不要在剪过的文件上测。
++>
++> 做完抽查切点前后 3 帧。
++
++## 工具分工
++
++- `post.py concat` 已经做了第 3、4 条：每段按 BT.601 解码、lanczos 放大到 1920×1080、轻微锐化、中间文件用 FFV1 无损、输出 H.264 标 BT.709。所以**放大只在 concat 这一步做一次**。
++- `post.py grade`、`post.py trim` 只用于**拼接之后**的整片（已经是 BT.709 的 1080p）：整片再统一调一点彩度亮度、剪掉整片的头尾。每过一次都是一次有损编码，能少用就少用。
++- 逐段的处理（剪头尾、按首帧把颜色调回来、按故事分段调色、补推镜、停在某一帧、转场）都在**拼接之前**对单个片段做，现写 ffmpeg/Python 代码。
++- `.venv` 里只有 Pillow，没有 numpy；需要装别的包先问本人。
++- ffmpeg 的位置：`FF=$(.venv/Scripts/python -c "import sys; sys.path.insert(0, 'scripts/py'); import common; print(common.ffmpeg_bin())")`，之后用 `"$FF" -n ...`（`-n`：输出已存在就拒绝，不覆盖）。
++
++## 做什么
++
++### 1. 定剪辑清单 `post/edl-v<n>.md`
++
++每镜一行：用哪个片段（`shots/<镜头>/clip-v<n>.mp4` 或修好的 `post/...`）、从第几秒到第几秒、转场方式、属于故事哪一段（决定调色）、对齐哪个小节。片段有多个版本时，抽帧比较后挑最好的；能用的都可以用上。
++
++### 2. 拼接前的单段处理
++
++规则：输出一律是 FFV1 无损 mkv（`-c:v ffv1 -level 3 -pix_fmt yuv420p`，有声音时 `-c:a pcm_s16le`，没声音时 `-an`）；**不缩放、不做色彩矩阵转换**（保持原片 BT.601 的数值，留给 concat 统一转换）；存到 `post/` 下的新文件，不改原片段。
++
++- 剪头尾（`-ss`/`-to` 放在 `-i` 后面，按帧精确）：
++  `"$FF" -n -i films/<片名>/shots/<镜头>/clip-v<n>.mp4 -ss 0.2 -to 4.8 -c:v ffv1 -level 3 -pix_fmt yuv420p -c:a pcm_s16le films/<片名>/post/<镜头>-cut-v<k>.mkv`
++- 分段调色：同一条命令加 `-vf eq=saturation=<值>:brightness=<值>`。只调彩度和亮度，不动色相；幅度要小。`eq` 是整幅调整，调完抽帧对比色表里强调色和肤色的色值，变了就改用 Python 逐帧做带遮罩的调整。不加颗粒、柔光、暗角。
++- 越到后面越暗越冷（mini 常见）：每段按它自己的首帧把颜色调回来——抽首帧和末段帧，比较亮度和色彩，按时间逐渐补偿。
++- 推得不够明显：用 `crop`+`scale` 按时间逐渐裁小再放回原尺寸（保持 16:9）。
++- 结尾几帧跳到尾帧的样子：选一张没问题的画面，后面都停在这一张（`tpad=stop_mode=clone` 或把那一帧重复）。
++- 转场：按方法论第 1 条，用一个东西盖屏或带过去。盖屏的东西用 Python 逐帧画；每个输出帧把这一帧前半个帧间隔内的 8–16 个子位置叠加平均（运动模糊切 8–16 份、半帧快门），存 PNG 序列后编成 FFV1 mkv。
++
++### 3. 拼接和放大
++
++写清单 `post/concat-v<n>.txt`：按顺序每行一个文件（相对清单所在目录，如 `../shots/S01/clip-v2.mp4`、`S02-cut-v1.mkv`）。
++
++`.venv/Scripts/python scripts/py/post.py concat films/<片名>/post/concat-v<n>.txt films/<片名>/post/joined-v<n>.mp4`
++
++只要有一段带声音，没声音的段会自动补静音。片段自带的声音能不能用要本人在 G5 听过才算；本人说不用，就在下一步换掉音轨。
++
++### 4. 整片处理、配乐、字幕
++
++- 整片再调一点：`.venv/Scripts/python scripts/py/post.py grade films/<片名>/post/joined-v<n>.mp4 films/<片名>/post/graded-v<n>.mp4 --sat 1.05 --bright 0.0`
++- 剪整片头尾：`.venv/Scripts/python scripts/py/post.py trim <输入> <输出> --start <秒> --end <秒>`
++- 配乐（`settings.music` 不是 null）：拍点只从原曲文件上测（用 BPM 算小节线，第一拍的位置在原曲上找），不要在剪过的文件上测；转折对副歌，关键动作对重拍。混音用 ffmpeg：画面 `-c:v copy`（保持 BT.709 标记），声音 `-c:a aac -b:a 192k`；要保留片段音效就 `amix`，不要就只用音乐。
++- 字幕（`settings.subtitles` 为 true）：字幕文字先给本人确认，写 `post/subs-v<n>.srt`；烧进画面要重编码，参数照 `post.py` 的输出（`-c:v libx264 -preset slow -crf 16 -pix_fmt yuv420p -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv`）。
++- 最后一步的输出写成 `out/final-v<n>.mp4`（新编号）。
++
++### 5. 抽查切点前后 3 帧
++
++切点时间 = 前面各段时长之和（用 `frames.py` 抽之前，先按清单算好，或用 ffprobe 读每段时长）。把帧抽进 `out/final-v<n>-frames/`（n 和成片的一样，`final` 审核会读这个目录里的图）：
++
++1. 切点前后各 3 帧：`.venv/Scripts/python scripts/py/frames.py extract films/<片名>/out/final-v<n>.mp4 films/<片名>/out/final-v<n>-frames --around <切点1>,<切点2>,... --n 3`
++2. 每镜再取几张：`.venv/Scripts/python scripts/py/frames.py extract films/<片名>/out/final-v<n>.mp4 films/<片名>/out/final-v<n>-frames --around <每镜中间的几个时间点> --n 0`（时间点离切点 0.2 秒以上；有重名帧会整个拒绝、一张不写，换个时间点再来）。
++3. 自己用 Read 逐张看切点前后：有没有突跳、颜色跳变、重复动作、道具数量变了。有问题回第 2 步改，出新版本成片和新的帧目录。
++
++### 6. 审核 `final`
++
++`node scripts/review.ts prepare final <片名>`（不带 `--shot`；资料是最新的 `out/final-v<n>.mp4` 和 `out/final-v<n>-frames/` 里的图）。流程见 SKILL.md"审核怎么做"。审核会分"硬伤"和"小问题"列出；硬伤改完出新版本再审。
++
++### 7. 问 G6
++
++按 `../gates.md` 的 G6 问本人，附成片和审核回复；写明我没看过动态、没听过声音。
++
++## 产物
++
++- `post/edl-v<n>.md`：剪辑清单
++- `post/<镜头>-cut-v<k>.mkv` 等：拼接前处理过的单段（FFV1 无损）
++- `post/concat-v<n>.txt`、`post/joined-v<n>.mp4`：拼接清单和拼接结果
++- `out/final-v<n>.mp4`：成片（`final` 审核的资料）
++- `out/final-v<n>-frames/`：抽查帧（`final` 审核的资料）
++
++## 完成后 `state` 怎么改
++
++G6 选"验收"：`gates.G6 = "approved"`，`stage = "wrap"`，打开 `8-wrap.md`。
+diff --git a/.claude/skills/film-director/references/stages/8-wrap.md b/.claude/skills/film-director/references/stages/8-wrap.md
+new file mode 100644
+index 0000000..97392c3
+--- /dev/null
++++ b/.claude/skills/film-director/references/stages/8-wrap.md
+@@ -0,0 +1,27 @@
++# 阶段 8：总结和交付（`stage = "wrap"`）
++
++方法论：最后让 AI 写一份总结，把画风、提示词、犯过的错误都存好，把每一次做视频的经验沉淀下来。
++
++## 做什么
++
++### 1. 写 `lessons.md`
++
++存成 `films/<片名>/lessons.md`（已存在就写 `lessons-v<n>.md`，不覆盖）。内容：
++
++1. **画风一句话**：G3 定下的那句，加上样帧路径（`style/look-v<n>.png`）。
++2. **用过且有效的提示词**：每镜最后用上的 `shots/<镜头>/prompt-v<n>.txt` 路径，挑两三条效果最好的原文贴上，写一句为什么有效。
++3. **犯过的错和修法**：每条写"什么问题 → 在哪一步发现（审核、自检、抽帧、本人）→ 怎么修的（剪掉、代码修、重拍）"。能补进 `../pitfalls.md` 的新规律单独列出来，告诉本人，由本人决定要不要加（不要自己改 Skill）。
++4. **总花费**：以 `spend.jsonl` 各行 `cny` 之和为准（只读，不改；`state.spentCNY` 一般和它一样），并列出每份报价（`quotes/Q<n>.json`）的镜头和金额、哪些是重拍或重试。写明"金额是估算，以账单为准"。
++5. **没看过、没听过的**：重申成片的动态和声音只有本人看过听过。
++
++### 2. 告诉本人
++
++一段话：成片路径（`out/final-v<n>.mp4`）、总结路径、总花费（估算）。这里没有关口要问（`../gates.md` 的 G6 已经验收过）。
++
++## 产物
++
++- `lessons.md`
++
++## 完成后 `state` 怎么改
++
++`stage = "done"`。
+diff --git a/tests/skill.test.ts b/tests/skill.test.ts
+new file mode 100644
+index 0000000..5d20e13
+--- /dev/null
++++ b/tests/skill.test.ts
+@@ -0,0 +1,161 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
++import { dirname, join, relative, resolve } from "node:path";
++import { fileURLToPath } from "node:url";
++import { saidApproves } from "../scripts/approve.ts";
++
++const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
++const SKILL = join(REPO, ".claude", "skills", "film-director");
++const STAGES = join(SKILL, "references", "stages");
++const STAGE_FILES = [
++  "0-setup.md",
++  "1-story.md",
++  "2-board.md",
++  "3-style.md",
++  "4-keyframes.md",
++  "5-prompts.md",
++  "6-generate.md",
++  "7-post.md",
++  "8-wrap.md",
++];
++const GATES = ["G0", "G1", "G2", "G3", "G3b", "G4", "G5", "G6"];
++
++function read(p: string): string {
++  return readFileSync(p, "utf8");
++}
++
++function allFiles(dir: string): string[] {
++  const out: string[] = [];
++  for (const name of readdirSync(dir)) {
++    const p = join(dir, name);
++    if (statSync(p).isDirectory()) out.push(...allFiles(p));
++    else out.push(p);
++  }
++  return out;
++}
++
++function stageTexts(): { name: string; text: string }[] {
++  return STAGE_FILES.map((name) => ({ name, text: read(join(STAGES, name)) }));
++}
++
++/** gates.md 里某个关口那一节（从它的标题到下一个同级标题）。 */
++function gateSection(gate: string): string | null {
++  const text = read(join(SKILL, "references", "gates.md"));
++  const lines = text.split(/\r?\n/);
++  const head = new RegExp(`^##\\s+${gate}(?![0-9A-Za-z])`);
++  const start = lines.findIndex((l) => head.test(l));
++  if (start < 0) return null;
++  let end = lines.length;
++  for (let i = start + 1; i < lines.length; i++) {
++    if (/^##\s/.test(lines[i])) {
++      end = i;
++      break;
++    }
++  }
++  return lines.slice(start, end).join("\n");
++}
++
++test("SKILL.md has frontmatter with name film-director and a description", () => {
++  const text = read(join(SKILL, "SKILL.md"));
++  const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n/.exec(text);
++  assert.ok(m, "SKILL.md 开头要有 --- frontmatter ---");
++  assert.match(m[1], /^name: film-director$/m);
++  assert.match(m[1], /^description: .+/m);
++});
++
++test("every references/... path mentioned in SKILL.md exists", () => {
++  const text = read(join(SKILL, "SKILL.md"));
++  const refs = [...text.matchAll(/references\/[A-Za-z0-9_\-./]+/g)].map((m) => m[0].replace(/[.]+$/, ""));
++  assert.ok(refs.length >= 12, `SKILL.md 应该列出各阶段手册和参考资料，只找到 ${refs.length} 个`);
++  for (const r of refs) assert.ok(existsSync(join(SKILL, r)), `SKILL.md 提到的 ${r} 不存在`);
++  for (const name of STAGE_FILES) assert.ok(refs.includes(`references/stages/${name}`), `SKILL.md 没列 ${name}`);
++  for (const name of ["gates.md", "pitfalls.md", "seven-part-prompt.md"]) {
++    assert.ok(refs.includes(`references/${name}`), `SKILL.md 没列 ${name}`);
++  }
++});
++
++test("stages/ holds exactly the 9 stage files", () => {
++  assert.deepEqual(readdirSync(STAGES).sort(), [...STAGE_FILES].sort());
++});
++
++test("gates.md has one section per gate G0–G6 (incl. G3b)", () => {
++  for (const g of GATES) assert.ok(gateSection(g), `gates.md 缺少 ${g} 一节`);
++});
++
++test("G4 option '批准 Q<n>（¥合计）' is accepted by approve.ts for that quote only", () => {
++  const g4 = gateSection("G4")!;
++  assert.ok(g4.includes("批准 Q"), "G4 要有 批准 Q 选项");
++  const m = /`(批准 Q<n>（¥[^`]*）)`/.exec(g4);
++  assert.ok(m, "G4 选项要原样写成 `批准 Q<n>（¥合计）`");
++  const sample = m[1].replace("<n>", "3").replace("合计", "1.2");
++  assert.ok(saidApproves(sample, "Q3"), `approve.ts 不认 ${sample}`);
++  assert.ok(!saidApproves(sample, "Q31"), "Q3 的选项不能被当成 Q31 的批准");
++  assert.ok(g4.includes("先不拍"));
++  assert.ok(g4.includes("改用 2.5 重新报价"));
++  assert.ok(g4.includes("firstLastFrame"), "G4 要写明第二项只在 2.5 支持首尾帧时出现");
++});
++
++test("G5 says plainly that the director has not seen motion or heard sound", () => {
++  assert.ok(gateSection("G5")!.includes("我没看过动态、没听过声音"));
++});
++
++test("stage files use the artifact patterns of config/reviews.json", () => {
++  const cfg = JSON.parse(read(join(REPO, "config", "reviews.json"))) as Record<string, string[]>;
++  const all = stageTexts().map((s) => s.text).join("\n");
++  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
++  for (const pattern of new Set(Object.values(cfg).flat())) {
++    // 文档里的写法：v* → v<n>；<镜头> → <镜头> 或 S01；其余 * → <名字>
++    let src = "";
++    const segs = pattern.split("/");
++    for (let i = 0; i < segs.length; i++) {
++      if (i > 0) src += "/";
++      const seg = segs[i];
++      if (seg === "<镜头>") {
++        src += "(?:<镜头>|S\\d{2,3})";
++        continue;
++      }
++      const parts = seg.split("*");
++      for (let j = 0; j < parts.length; j++) {
++        src += esc(parts[j]);
++        if (j === parts.length - 1) break;
++        src += parts[j].endsWith("v") ? "<n>" : "<[^>/\\s`]+>";
++      }
++    }
++    assert.match(all, new RegExp(src), `阶段手册里没有出现 ${pattern} 的写法`);
++
++    // 同名产物不能写到别的目录
++    const last = segs.at(-1)!.replace(/\/$/, "");
++    const stem = last.split("*")[0]; // 如 "storyboard-v"、"sheet-"
++    if (!stem.endsWith("-v")) continue;
++    const dirSrc = segs.slice(0, -1).join("/");
++    const re = new RegExp(`([A-Za-z0-9_<>\\u4e00-\\u9fa5/]+)/${esc(stem)}<n>`, "g");
++    for (const m of all.matchAll(re)) {
++      const dir = m[1].replace(/^.*films\/<片名>\//, "").replace(/^films\/[^/]+\//, "");
++      const want = new RegExp(`^${esc(dirSrc).replace(esc("<镜头>"), "(?:<镜头>|S\\d{2,3})")}$`);
++      assert.match(dir, want, `${m[0]} 的目录应是 ${dirSrc}`);
++    }
++  }
++});
++
++test("every stage file with a gate points to gates.md", () => {
++  for (const { name, text } of stageTexts()) {
++    if (/G\d/.test(text)) assert.ok(text.includes("gates.md"), `${name} 提到关口但没引用 gates.md`);
++  }
++});
++
++test("commands named in the Skill exist", () => {
++  const texts = allFiles(SKILL).filter((p) => p.endsWith(".md")).map(read).join("\n");
++  for (const m of texts.matchAll(/scripts\/((?:py\/)?[a-z0-9-]+\.(?:ts|py))/g)) {
++    assert.ok(existsSync(join(REPO, "scripts", m[1])), `Skill 提到的 scripts/${m[1]} 不存在`);
++  }
++});
++
++test("no Skill text contains forbidden strings", () => {
++  for (const p of allFiles(SKILL)) {
++    const text = read(p);
++    for (const bad of ["SEEDANCE_API_KEY=", "ARK_API_KEY", "agent-autoloop"]) {
++      assert.ok(!text.includes(bad), `${relative(REPO, p)} 里出现了 ${bad}`);
++    }
++  }
++});

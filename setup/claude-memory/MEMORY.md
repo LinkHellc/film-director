@@ -1,0 +1,2 @@
+- [Auto-open generated outputs](auto-open-generated-outputs.md) — open every generated image/clip/video for the user automatically
+- [用中文交流](reply-in-chinese.md) — 本人要求全程中文回复

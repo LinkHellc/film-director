@@ -9,6 +9,28 @@
 - `.claude/skills/film-director/references/stages/`：各阶段手册（0-setup … 8-wrap）
 - 设计文档：`docs/superpowers/specs/2026-11-07-ai-film-autoloop-design.md`（以"修订 R1"一节为准）
 
+## 零、在新电脑上部署
+
+1. 克隆（私有仓库，第一次会弹出 GitHub 浏览器登录）：
+   ```powershell
+   git clone https://github.com/Link_Hellc/claude-short-film.git
+   cd claude-short-film
+   ```
+2. 一键安装（Node、ffmpeg、Codex CLI、`.venv` + Pillow、Claude 记忆、跑测试）：
+   ```powershell
+   powershell -NoProfile -ExecutionPolicy Bypass -File setup\install.ps1
+   ```
+3. 自己设视频网关 Key（见下面第一节第 6 条），然后**重启 Claude 桌面端**。
+4. 第一次用 Codex 要在终端运行 `codex` 登录。
+5. 在 Claude 桌面端用 Code 打开这个目录，说"开一支新片：……"或"继续做《试跑》"。
+
+仓库里带了什么：
+- `.claude/skills/film-director/`（导演 Skill）和 `.claude/agents/film-reviewer.md`（审核员）：项目级，打开目录就生效，不用另装。
+- `setup/claude-memory/`：本项目的 Claude 记忆（中文交流、生成后自动打开）。`install.ps1` 按仓库所在路径装到 `~/.claude/projects/<路径>/memory/`，已有同名文件不覆盖。
+- `films/`：已做的片子（含 `试跑` 的设定图、首尾帧、片段和成片），`continue` 可以直接接着做。
+- `.superpowers/`：开发台账（设计、计划、各轮任务和审核报告）。
+- **不含任何密钥**：`SEEDANCE_API_KEY` 只放用户环境变量。
+
 ## 一、前置条件
 
 以下都在 Windows 上，命令在 PowerShell 里运行，目录是本项目根目录。

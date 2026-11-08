@@ -1,0 +1,1179 @@
+# Review package: a1c95d4..HEAD
+
+## Commits
+0f42f0e feat: 图像与后期工具
+
+## Files changed
+ requirements.txt           |   1 +
+ scripts/py/common.py       | 122 ++++++++++++++++++++++++++++++++
+ scripts/py/frames.py       | 165 +++++++++++++++++++++++++++++++++++++++++++
+ scripts/py/grayscale.py    | 100 +++++++++++++++++++++++++++
+ scripts/py/post.py         | 169 +++++++++++++++++++++++++++++++++++++++++++++
+ scripts/py/sketch.py       | 150 ++++++++++++++++++++++++++++++++++++++++
+ tests/py/_util.py          |  51 ++++++++++++++
+ tests/py/test_frames.py    |  91 ++++++++++++++++++++++++
+ tests/py/test_grayscale.py |  75 ++++++++++++++++++++
+ tests/py/test_post.py      | 105 ++++++++++++++++++++++++++++
+ tests/py/test_sketch.py    |  64 +++++++++++++++++
+ 11 files changed, 1093 insertions(+)
+
+## Diff
+diff --git a/requirements.txt b/requirements.txt
+new file mode 100644
+index 0000000..7e2fba5
+--- /dev/null
++++ b/requirements.txt
+@@ -0,0 +1 @@
++Pillow
+diff --git a/scripts/py/common.py b/scripts/py/common.py
+new file mode 100644
+index 0000000..b5bbe97
+--- /dev/null
++++ b/scripts/py/common.py
+@@ -0,0 +1,122 @@
++"""scripts/py 共用：找 ffmpeg/ffprobe、只新建不覆盖、统一报错退出。
++
++找 ffmpeg 的顺序（ffprobe 同理）：
++  1. 环境变量 FFMPEG / FFPROBE（完整路径）；只设了 FFMPEG 时，ffprobe 先找它旁边的 ffprobe。
++  2. PATH 上的 ffmpeg / ffprobe。
++  3. winget 装的 Gyan.FFmpeg：%LOCALAPPDATA%/Microsoft/WinGet/Packages/Gyan.FFmpeg*/*/bin/。
++     （winget 装完要开新 shell 才进 PATH，这一步让旧 shell 也能用。）
++
++退出码约定：0 成功；1 检查没通过或 ffmpeg 执行失败；2 参数/输入有问题或输出已存在。
++"""
++import os
++import shutil
++import subprocess
++import sys
++from pathlib import Path
++
++for _s in (sys.stdout, sys.stderr):
++    try:
++        _s.reconfigure(encoding="utf-8")
++    except (AttributeError, ValueError):
++        pass
++
++
++class Fail(Exception):
++    """带退出码的一句话中文错误。"""
++
++    def __init__(self, msg, code=2):
++        super().__init__(msg)
++        self.code = code
++
++
++def main_wrapper(fn):
++    """运行 fn()，把 Fail 变成 stderr 一句话 + 退出码。"""
++    try:
++        code = fn()
++    except Fail as e:
++        print(str(e), file=sys.stderr)
++        code = e.code
++    sys.exit(code or 0)
++
++
++def _winget_bin(name):
++    base = os.environ.get("LOCALAPPDATA")
++    if not base:
++        return None
++    hits = sorted(Path(base, "Microsoft", "WinGet", "Packages").glob(f"Gyan.FFmpeg*/*/bin/{name}.exe"))
++    return str(hits[-1]) if hits else None
++
++
++def _find(name, env_key, sibling_of=None):
++    if os.environ.get(env_key):
++        return os.environ[env_key]
++    if sibling_of:
++        for cand in (Path(sibling_of).with_name(name + ".exe"), Path(sibling_of).with_name(name)):
++            if cand.is_file():
++                return str(cand)
++    return shutil.which(name) or _winget_bin(name) or name
++
++
++def ffmpeg_bin():
++    return _find("ffmpeg", "FFMPEG")
++
++
++def ffprobe_bin():
++    return _find("ffprobe", "FFPROBE", sibling_of=os.environ.get("FFMPEG"))
++
++
++def run_tool(args, what):
++    """跑 ffmpeg/ffprobe，失败时抛 Fail（退出码 1），返回 stdout 文本。"""
++    try:
++        p = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace")
++    except FileNotFoundError:
++        raise Fail(f"找不到 {Path(args[0]).name}，请安装 ffmpeg 或用环境变量 FFMPEG/FFPROBE 指定路径。", 1)
++    if p.returncode != 0:
++        tail = p.stderr.strip().splitlines()[-3:]
++        raise Fail(f"{what}失败：{' | '.join(tail)}", 1)
++    return p.stdout
++
++
++def ffmpeg(args, what="ffmpeg 处理"):
++    # -n：输出已存在时 ffmpeg 自己也拒绝，和调用前的检查双保险
++    return run_tool([ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-nostdin", "-n", *map(str, args)], what)
++
++
++def ffprobe_json(path):
++    import json
++    out = run_tool([ffprobe_bin(), "-v", "error", "-print_format", "json",
++                    "-show_streams", "-show_format", str(path)], f"读取 {Path(path).name} 的信息")
++    return json.loads(out)
++
++
++def need_input(path):
++    p = Path(path)
++    if not p.is_file():
++        raise Fail(f"输入文件不存在：{p}。")
++    return p
++
++
++def need_new(path):
++    """输出路径必须还不存在（只新建、不覆盖），父目录不存在就建。"""
++    p = Path(path)
++    if p.exists():
++        raise Fail(f"输出已存在，不覆盖：{p}。")
++    p.parent.mkdir(parents=True, exist_ok=True)
++    return p
++
++
++def save_image_new(img, path):
++    """以独占方式新建并保存图片（文件已存在则失败，写一半出错会删掉半成品）。"""
++    p = need_new(path)
++    fmt = {".jpg": "JPEG", ".jpeg": "JPEG", ".webp": "WEBP"}.get(p.suffix.lower(), "PNG")
++    try:
++        f = open(p, "xb")
++    except FileExistsError:
++        raise Fail(f"输出已存在，不覆盖：{p}。")
++    try:
++        with f:
++            img.save(f, format=fmt)
++    except Exception:
++        p.unlink(missing_ok=True)
++        raise
++    return p
+diff --git a/scripts/py/frames.py b/scripts/py/frames.py
+new file mode 100644
+index 0000000..29dc458
+--- /dev/null
++++ b/scripts/py/frames.py
+@@ -0,0 +1,165 @@
++"""抽帧、居中裁 16:9、首尾帧对比。
++
++  frames.py extract <视频> <输出目录> [--every 0.5]
++  frames.py extract <视频> <输出目录> --around 2.0,5.0 [--n 3]
++      --every：从 0 秒起每隔几秒取一帧（默认 0.5）。
++      --around：在每个时间点所在的那一帧前后各取 n 帧（相邻帧，按视频帧率），共 2n+1 张；多个点用逗号隔开。
++      文件名 t<毫秒7位>ms.png。输出目录可以已存在，但要写的任一文件已存在就整个拒绝、一张也不写。
++  frames.py crop169 <输入png> <输出png>
++      居中裁成 16:9（宽了裁左右，高了裁上下）。
++  frames.py compare <首帧> <尾帧> <输出png>
++      左边 50% 叠加图、右边差值图（拉满对比度方便看）；按 8×8 网格打印差异最大的 5 格。
++输出已存在则拒绝（退出码 2），原文件不动。ffmpeg 位置见 common.py。
++"""
++import argparse
++from pathlib import Path
++
++from PIL import Image, ImageChops, ImageOps
++
++from common import Fail, ffmpeg, ffprobe_json, main_wrapper, need_input, need_new, save_image_new
++
++GRID = 8
++
++
++def video_info(path):
++    info = ffprobe_json(path)
++    v = next((s for s in info.get("streams", []) if s.get("codec_type") == "video"), None)
++    if v is None:
++        raise Fail(f"{Path(path).name} 里没有视频流。")
++    num, _, den = (v.get("avg_frame_rate") or v.get("r_frame_rate") or "0/1").partition("/")
++    fps = float(num) / float(den or 1) if float(den or 1) else 0.0
++    duration = float(v.get("duration") or info.get("format", {}).get("duration") or 0)
++    if fps <= 0 or duration <= 0:
++        raise Fail(f"读不出 {Path(path).name} 的帧率或时长。")
++    return fps, duration
++
++
++def plan_times(fps, duration, every=None, around=None, n=3):
++    """返回要取的帧序号（升序、去重）。"""
++    last = max(0, int(duration * fps + 1e-6) - 1)  # 最后一帧的序号
++    idx = set()
++    if around is not None:
++        for t in around:
++            c = min(last, max(0, round(t * fps)))
++            idx.update(i for i in range(c - n, c + n + 1) if 0 <= i <= last)
++    else:
++        k = 0
++        while k * every < duration - 1e-6:
++            idx.add(min(last, round(k * every * fps)))
++            k += 1
++    return sorted(idx)
++
++
++def cmd_extract(a):
++    src = need_input(a.video)
++    if a.every is not None and a.around is not None:
++        raise Fail("--every 和 --around 只能选一个。")
++    around = None
++    if a.around is not None:
++        try:
++            around = [float(x) for x in a.around.split(",") if x.strip()]
++        except ValueError:
++            raise Fail(f"--around 要写成逗号分隔的秒数，比如 2.0,5.0，收到 {a.around!r}。")
++        if not around or a.n < 0:
++            raise Fail("--around 至少给一个时间点，--n 不能是负数。")
++    every = a.every if a.every is not None else 0.5
++    if every <= 0:
++        raise Fail("--every 必须大于 0。")
++    fps, duration = video_info(src)
++    frames = plan_times(fps, duration, every, around, a.n)
++    out_dir = Path(a.out_dir)
++    targets = [(i, out_dir / f"t{round(i / fps * 1000):07d}ms.png") for i in frames]
++    clash = [p for _, p in targets if p.exists()]
++    if clash:
++        raise Fail(f"输出已存在，不覆盖：{clash[0]}（共 {len(clash)} 张重名）。")
++    out_dir.mkdir(parents=True, exist_ok=True)
++    for i, path in targets:
++        # 往前让 0.25 帧再 seek：ffmpeg 取第一个时间戳 ≥ ss 的帧，正好是第 i 帧
++        ss = max(0.0, (i - 0.25) / fps)
++        ffmpeg(["-ss", f"{ss:.6f}", "-i", src, "-frames:v", "1", "-update", "1", path], f"抽第 {i} 帧")
++    print(f"已抽 {len(targets)} 帧到 {out_dir}")
++    return 0
++
++
++def crop_box_169(w, h):
++    if w * 9 > h * 16:
++        cw = round(h * 16 / 9)
++        left = (w - cw) // 2
++        return left, 0, left + cw, h
++    ch = round(w * 9 / 16)
++    top = (h - ch) // 2
++    return 0, top, w, top + ch
++
++
++def open_rgb(path):
++    try:
++        with Image.open(need_input(path)) as im:
++            return im.convert("RGB")
++    except OSError:
++        raise Fail(f"读不出图片：{path}。")
++
++
++def cmd_crop169(a):
++    need_new(a.output)
++    img = open_rgb(a.input)
++    out = img.crop(crop_box_169(*img.size))
++    save_image_new(out, a.output)
++    print(f"已裁成 {out.width}×{out.height}：{a.output}")
++    return 0
++
++
++def top_cells(diff_gray, k=5):
++    """8×8 网格里平均差异（0–1）最大的 k 格：[(行, 列, 差异)]，行列从 1 起。"""
++    w, h = diff_gray.size
++    cells = []
++    for r in range(GRID):
++        for c in range(GRID):
++            box = (c * w // GRID, r * h // GRID, (c + 1) * w // GRID, (r + 1) * h // GRID)
++            cell = diff_gray.crop(box)
++            hist = cell.histogram()
++            total = sum(hist) or 1
++            cells.append((r + 1, c + 1, sum(v * n for v, n in enumerate(hist)) / total / 255))
++    cells.sort(key=lambda x: (-x[2], x[0], x[1]))
++    return cells[:k]
++
++
++def cmd_compare(a):
++    need_new(a.output)
++    first, last = open_rgb(a.first), open_rgb(a.last)
++    if last.size != first.size:
++        last = last.resize(first.size, Image.LANCZOS)
++    overlay = Image.blend(first, last, 0.5)
++    diff = ImageChops.difference(first, last)
++    cells = top_cells(diff.convert("L"))
++    sheet = Image.new("RGB", (first.width * 2, first.height))
++    sheet.paste(overlay, (0, 0))
++    sheet.paste(ImageOps.autocontrast(diff), (first.width, 0))
++    save_image_new(sheet, a.output)
++    print(f"差异最大的 5 格（8×8 网格，0–1）已画到 {a.output}：")
++    for r, c, v in cells:
++        print(f"第{r}行第{c}列 差异 {v:.3f}")
++    return 0
++
++
++def main():
++    ap = argparse.ArgumentParser(description="抽帧、裁 16:9、首尾帧对比")
++    sub = ap.add_subparsers(dest="cmd", required=True)
++    e = sub.add_parser("extract")
++    e.add_argument("video")
++    e.add_argument("out_dir")
++    e.add_argument("--every", type=float)
++    e.add_argument("--around")
++    e.add_argument("--n", type=int, default=3)
++    c = sub.add_parser("crop169")
++    c.add_argument("input")
++    c.add_argument("output")
++    m = sub.add_parser("compare")
++    m.add_argument("first")
++    m.add_argument("last")
++    m.add_argument("output")
++    a = ap.parse_args()
++    return {"extract": cmd_extract, "crop169": cmd_crop169, "compare": cmd_compare}[a.cmd](a)
++
++
++if __name__ == "__main__":
++    main_wrapper(main)
+diff --git a/scripts/py/grayscale.py b/scripts/py/grayscale.py
+new file mode 100644
+index 0000000..c877b6a
+--- /dev/null
++++ b/scripts/py/grayscale.py
+@@ -0,0 +1,100 @@
++"""黑白检查：转灰度存图，并检查每个色块和周围背景的明暗差。
++
++用法：python grayscale.py <输入png> <输出png> [--board 分镜JSON] [--min-contrast 0.25]
++
++不给 --board 时只转灰度。给了 --board（格式见 sketch.py）时，对每个色块取块内亮度中位数、
++块外一圈（向外扩块宽高的 25%，不含其他色块）的亮度中位数，差值除以 255 得 0–1，
++低于阈值的逐条列出，退出码 1 表示"明暗对比不够"；全部够则退出 0。
++
++色块位置怎么对到图上：
++  - 分镜只有 1 个镜头且图是 16:9 → 整张图就是这一镜；
++  - 否则按 sketch.py 的总表排法（每行 3 张、每张 16:9）切格子，第 i 个镜头对应第 i 格。
++输出已存在则拒绝（退出码 2），原文件不动。
++"""
++import argparse
++import math
++import statistics
++
++from PIL import Image
++
++from common import Fail, main_wrapper, need_input, need_new, save_image_new
++from sketch import COLS, block_box, load_board
++
++
++def frames_for(img, shots):
++    """返回每个镜头在图上的区域 (left, top, w, h)。"""
++    W, H = img.size
++    if len(shots) == 1 and abs(W / H - 16 / 9) < 0.02:
++        return [(0, 0, W, H)]
++    tw = W / COLS
++    th = tw * 9 / 16
++    rows = math.ceil(len(shots) / COLS)
++    if abs(rows * th - H) > 2:
++        raise Fail(f"图的尺寸 {W}×{H} 和 {len(shots)} 个镜头的草图总表对不上。")
++    return [(round((i % COLS) * tw), round((i // COLS) * th), round(tw), round(th)) for i in range(len(shots))]
++
++
++def median_in(gray, boxes, exclude):
++    """boxes 里所有像素、去掉落在 exclude 框里的，取亮度中位数；没有像素返回 None。"""
++    px = gray.load()
++    vals = []
++    for x0, y0, x1, y1 in boxes:
++        for y in range(y0, y1):
++            for x in range(x0, x1):
++                if not any(e[0] <= x < e[2] and e[1] <= y < e[3] for e in exclude):
++                    vals.append(px[x, y])
++    return statistics.median(vals) if vals else None
++
++
++def check(gray, shots, min_contrast):
++    """返回 [(镜头, 标签, 对比度)]，只含低于阈值的块。对比度在缩小到每镜宽 ≤320 的图上算，够准也够快。"""
++    low = []
++    for shot, (L, T, w, h) in zip(shots, frames_for(gray, shots)):
++        frame = gray.crop((L, T, L + w, T + h))
++        scale = min(1.0, 320 / w)
++        fw, fh = max(1, round(w * scale)), max(1, round(h * scale))
++        frame = frame.resize((fw, fh), Image.BOX)
++        boxes = [block_box(b, fw, fh) for b in shot["blocks"]]
++        for i, (b, (x0, y0, x1, y1)) in enumerate(zip(shot["blocks"], boxes)):
++            inside = median_in(frame, [(x0, y0, x1, y1)], [])
++            mx, my = max(2, round((x1 - x0) * 0.25)), max(2, round((y1 - y0) * 0.25))
++            ox0, oy0, ox1, oy1 = max(0, x0 - mx), max(0, y0 - my), min(fw, x1 + mx), min(fh, y1 + my)
++            ring = [(ox0, oy0, ox1, y0), (ox0, y1, ox1, oy1), (ox0, y0, x0, y1), (x1, y0, ox1, y1)]
++            around = median_in(frame, ring, boxes)
++            if around is None:  # 块周围全被别的块占了，无从比较，跳过
++                continue
++            c = abs(inside - around) / 255
++            if c < min_contrast:
++                low.append((shot["shot"], b["label"] or f"第{i + 1}块", c))
++    return low
++
++
++def main():
++    ap = argparse.ArgumentParser(description="转灰度并检查色块明暗对比")
++    ap.add_argument("input")
++    ap.add_argument("output")
++    ap.add_argument("--board")
++    ap.add_argument("--min-contrast", type=float, default=0.25)
++    a = ap.parse_args()
++    src = need_input(a.input)
++    need_new(a.output)
++    if not 0 <= a.min_contrast <= 1:
++        raise Fail("--min-contrast 必须在 0 到 1 之间。")
++    shots = load_board(need_input(a.board)) if a.board else None
++    try:
++        gray = Image.open(src).convert("L")
++    except OSError:
++        raise Fail(f"读不出图片：{src}。")
++    low = check(gray, shots, a.min_contrast) if shots else []
++    save_image_new(gray, a.output)
++    if low:
++        print(f"明暗对比不够（阈值 {a.min_contrast:.2f}）：")
++        for shot, label, c in low:
++            print(f"{shot} {label} 对比度 {c:.3f}")
++        return 1
++    print(f"已存灰度图 {a.output}" + ("，所有色块明暗对比都够。" if shots else "。"))
++    return 0
++
++
++if __name__ == "__main__":
++    main_wrapper(main)
+diff --git a/scripts/py/post.py b/scripts/py/post.py
+new file mode 100644
+index 0000000..dbe7423
+--- /dev/null
++++ b/scripts/py/post.py
+@@ -0,0 +1,169 @@
++"""后期：拼接放大、调彩度亮度、剪头尾。
++
++  post.py concat <清单txt> <输出mp4>
++      清单每行一个视频路径（相对清单所在目录），空行和 # 开头的行忽略，也认 ffmpeg 的 file '...' 写法。
++      1) 每段：输入按 BT.601 解释（-colorspace bt470bg + setparams），
++         scale=1920:1080:flags=lanczos（BT.601→BT.709 矩阵）+ unsharp=5:5:0.3，帧率统一成第一段的，
++         存成 FFV1 无损 mkv 中间文件（在输出旁的 .post-tmp-* 临时目录里，做完就删）。
++         只要有一段带声音，没声音的段补等长静音；全都没声音就不要音轨。
++      2) 按清单顺序拼接，输出 H.264（yuv420p，crf 16）+ AAC，标 bt709（colorspace/primaries/trc）。
++  post.py grade <输入> <输出> [--sat 1.0] [--bright 0.0]
++      只调彩度和亮度（eq=saturation=..:brightness=..），不动色相；输出 H.264 标 bt709。
++  post.py trim <输入> <输出> --start 秒 --end 秒
++      重编码精确剪到 [start, end)；输出 H.264 标 bt709。
++grade/trim 预期用在 concat 之后（已是 BT.709）的素材上。
++输出已存在则拒绝（退出码 2），原文件不动；ffmpeg 出错退出码 1。ffmpeg 位置见 common.py。
++"""
++import argparse
++import shutil
++import tempfile
++from pathlib import Path
++
++from common import Fail, ffmpeg, ffprobe_json, main_wrapper, need_input, need_new
++
++UPSCALE = ("scale=1920:1080:flags=lanczos:in_color_matrix=bt601:out_color_matrix=bt709"
++           ":in_range=tv:out_range=tv,unsharp=5:5:0.3")
++BT601_IN = "setparams=colorspace=bt470bg:color_primaries=bt470bg:color_trc=smpte170m:range=tv"
++BT709_TAG = "setparams=colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv"
++H264_OUT = ["-c:v", "libx264", "-preset", "slow", "-crf", "16", "-pix_fmt", "yuv420p",
++            "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709", "-color_range", "tv",
++            "-movflags", "+faststart"]
++AAC_OUT = ["-c:a", "aac", "-b:a", "192k", "-ar", "48000"]
++
++
++def streams(path):
++    info = ffprobe_json(path)
++    v = next((s for s in info.get("streams", []) if s.get("codec_type") == "video"), None)
++    if v is None:
++        raise Fail(f"{Path(path).name} 里没有视频流。")
++    has_audio = any(s.get("codec_type") == "audio" for s in info["streams"])
++    duration = float(v.get("duration") or info.get("format", {}).get("duration") or 0)
++    if duration <= 0:
++        raise Fail(f"读不出 {Path(path).name} 的时长。")
++    return v, has_audio, duration
++
++
++def read_list(list_path):
++    base = list_path.parent
++    clips = []
++    for raw in list_path.read_text(encoding="utf-8-sig").splitlines():
++        line = raw.strip()
++        if not line or line.startswith("#"):
++            continue
++        if line.startswith("file "):
++            line = line[5:].strip().strip("'\"")
++        p = Path(line)
++        clips.append(need_input(p if p.is_absolute() else base / p))
++    if not clips:
++        raise Fail(f"清单里没有视频：{list_path}。")
++    return clips
++
++
++def concat_escape(path):
++    return "file '" + str(path).replace("\\", "/").replace("'", "'\\''") + "'"
++
++
++def cmd_concat(a):
++    lst = need_input(a.list)
++    out = need_new(a.output)
++    clips = read_list(lst)
++    probed = [streams(c) for c in clips]
++    any_audio = any(has for _, has, _ in probed)
++    fps = probed[0][0].get("avg_frame_rate") or probed[0][0].get("r_frame_rate")
++    if not fps or fps.startswith("0/"):
++        fps = "24"
++    tmp = Path(tempfile.mkdtemp(prefix=".post-tmp-", dir=out.parent))
++    try:
++        parts = []
++        for i, (clip, (_, has_audio, dur)) in enumerate(zip(clips, probed)):
++            mid = tmp / f"part{i:03d}.mkv"
++            args = ["-colorspace", "bt470bg", "-i", clip]
++            if any_audio and not has_audio:
++                args += ["-f", "lavfi", "-t", f"{dur:.6f}", "-i", "anullsrc=r=48000:cl=stereo"]
++            args += ["-map", "0:v:0"]
++            if any_audio:
++                args += ["-map", "0:a:0" if has_audio else "1:a:0", "-af", "apad",
++                         "-c:a", "pcm_s16le", "-ar", "48000", "-ac", "2"]
++            else:
++                args += ["-an"]
++            args += ["-vf", f"{BT601_IN},fps={fps},{UPSCALE},{BT709_TAG}",
++                     "-c:v", "ffv1", "-level", "3", "-pix_fmt", "yuv420p",
++                     "-t", f"{dur:.6f}", mid]
++            ffmpeg(args, f"处理第 {i + 1} 段 {clip.name} ")
++            parts.append(mid)
++        listing = tmp / "parts.txt"
++        listing.write_text("\n".join(concat_escape(p) for p in parts) + "\n", encoding="utf-8")
++        args = ["-f", "concat", "-safe", "0", "-i", listing, "-map", "0:v:0"]
++        args += (["-map", "0:a:0", *AAC_OUT] if any_audio else ["-an"])
++        try:
++            ffmpeg([*args, *H264_OUT, out], "拼接输出")
++        except Fail:
++            out.unlink(missing_ok=True)  # 调用前已确认不存在，这里删的只会是本次的半成品
++            raise
++    finally:
++        shutil.rmtree(tmp, ignore_errors=True)
++    print(f"已拼接 {len(clips)} 段并放大到 1920×1080：{out}")
++    return 0
++
++
++def encode_simple(src, out, pre_input, vf, what):
++    _, has_audio, _ = streams(src)
++    args = [*pre_input, "-i", src, "-map", "0:v:0"]
++    args += (["-map", "0:a:0", *AAC_OUT] if has_audio else ["-an"])
++    if vf:
++        args += ["-vf", vf]
++    try:
++        ffmpeg([*args, *H264_OUT, out], what)
++    except Fail:
++        out.unlink(missing_ok=True)
++        raise
++
++
++def cmd_grade(a):
++    src = need_input(a.input)
++    out = need_new(a.output)
++    if not 0 <= a.sat <= 3:
++        raise Fail("--sat 要在 0 到 3 之间（1 为不变）。")
++    if not -1 <= a.bright <= 1:
++        raise Fail("--bright 要在 -1 到 1 之间（0 为不变）。")
++    encode_simple(src, out, [], f"eq=saturation={a.sat}:brightness={a.bright},{BT709_TAG}", "调色")
++    print(f"已调色（彩度 {a.sat}，亮度 {a.bright}）：{out}")
++    return 0
++
++
++def cmd_trim(a):
++    src = need_input(a.input)
++    out = need_new(a.output)
++    if a.start < 0 or a.end <= a.start:
++        raise Fail("--start 不能为负，--end 必须大于 --start。")
++    _, _, dur = streams(src)
++    if a.start >= dur:
++        raise Fail(f"--start {a.start} 已超过视频时长 {dur:.2f} 秒。")
++    # -ss 放在 -i 前 + 重编码：ffmpeg 会精确到帧地丢掉 start 前的画面
++    encode_simple(src, out, ["-ss", f"{a.start:.6f}", "-t", f"{a.end - a.start:.6f}"], BT709_TAG, "剪辑")
++    print(f"已剪出 {a.start}–{a.end} 秒：{out}")
++    return 0
++
++
++def main():
++    ap = argparse.ArgumentParser(description="拼接放大、调色、剪辑")
++    sub = ap.add_subparsers(dest="cmd", required=True)
++    c = sub.add_parser("concat")
++    c.add_argument("list")
++    c.add_argument("output")
++    g = sub.add_parser("grade")
++    g.add_argument("input")
++    g.add_argument("output")
++    g.add_argument("--sat", type=float, default=1.0)
++    g.add_argument("--bright", type=float, default=0.0)
++    t = sub.add_parser("trim")
++    t.add_argument("input")
++    t.add_argument("output")
++    t.add_argument("--start", type=float, required=True)
++    t.add_argument("--end", type=float, required=True)
++    a = ap.parse_args()
++    return {"concat": cmd_concat, "grade": cmd_grade, "trim": cmd_trim}[a.cmd](a)
++
++
++if __name__ == "__main__":
++    main_wrapper(main)
+diff --git a/scripts/py/sketch.py b/scripts/py/sketch.py
+new file mode 100644
+index 0000000..018a069
+--- /dev/null
++++ b/scripts/py/sketch.py
+@@ -0,0 +1,150 @@
++"""色块草图总表。
++
++用法：python sketch.py <分镜JSON> <输出png>
++
++分镜 JSON：
++  [{"shot": "S01", "bg": "#1d2a3a",
++    "blocks": [{"x": 0.62, "y": 0.4, "w": 0.1, "h": 0.5, "color": "#c0392b", "label": "邮差"}]}]
++x/y/w/h 都是占画面宽/高的比例，(x, y) 是色块左上角；label 可省略，可以是中文。
++
++每镜先按 1920×1080 画：背景色、色块、标签，再在 x=38% 和 x=62% 画黄金分割竖线；
++然后缩到 640×360，镜头号写在左上角，每行 3 张拼成总表（宽固定 1920，空位填深灰）。
++输出已存在则拒绝（退出码 2），原文件不动。
++"""
++import json
++import math
++import sys
++from pathlib import Path
++
++from PIL import Image, ImageColor, ImageDraw, ImageFont
++
++from common import Fail, main_wrapper, need_input, need_new, save_image_new
++
++FRAME_W, FRAME_H = 1920, 1080
++TILE_W, TILE_H = 640, 360
++COLS = 3
++GUIDES = (0.38, 0.62)
++GUIDE_COLOR = (255, 214, 0)
++EMPTY_COLOR = (40, 40, 40)
++FONT_CANDIDATES = [
++    "C:/Windows/Fonts/msyh.ttc",
++    "C:/Windows/Fonts/simhei.ttf",
++    "C:/Windows/Fonts/Deng.ttf",
++    "/System/Library/Fonts/PingFang.ttc",
++    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
++]
++
++
++def load_font(size):
++    """找一个能写中文的字体；都没有就退回 Pillow 自带字体（中文可能显示成方块，但不报错）。"""
++    for path in FONT_CANDIDATES:
++        try:
++            return ImageFont.truetype(path, size)
++        except OSError:
++            continue
++    try:
++        return ImageFont.load_default(size=size)
++    except TypeError:
++        return ImageFont.load_default()
++
++
++def color(value, where):
++    try:
++        return ImageColor.getrgb(value)
++    except (ValueError, AttributeError):
++        raise Fail(f"{where} 的颜色写法不对：{value!r}。")
++
++
++def frac(block, key, where):
++    v = block.get(key)
++    if not isinstance(v, (int, float)) or isinstance(v, bool) or not 0 <= v <= 1:
++        raise Fail(f"{where} 的 {key} 必须是 0 到 1 之间的数。")
++    return float(v)
++
++
++def load_board(path):
++    try:
++        data = json.loads(Path(path).read_text(encoding="utf-8"))
++    except (json.JSONDecodeError, UnicodeDecodeError) as e:
++        raise Fail(f"分镜 JSON 读不出来：{e}。")
++    if not isinstance(data, list) or not data:
++        raise Fail("分镜 JSON 必须是非空数组，每项是一个镜头。")
++    shots = []
++    for i, s in enumerate(data):
++        if not isinstance(s, dict) or not isinstance(s.get("shot"), str):
++            raise Fail(f"第 {i + 1} 个镜头缺少 shot 名。")
++        name = s["shot"]
++        blocks = s.get("blocks", [])
++        if not isinstance(blocks, list):
++            raise Fail(f"{name} 的 blocks 必须是数组。")
++        parsed = []
++        for j, b in enumerate(blocks):
++            where = f"{name} 第 {j + 1} 个色块"
++            if not isinstance(b, dict):
++                raise Fail(f"{where} 必须是对象。")
++            parsed.append({
++                "x": frac(b, "x", where), "y": frac(b, "y", where),
++                "w": frac(b, "w", where), "h": frac(b, "h", where),
++                "color": color(b.get("color"), where),
++                "label": str(b.get("label") or ""),
++            })
++        shots.append({"shot": name, "bg": color(s.get("bg", "#000000"), name), "blocks": parsed})
++    return shots
++
++
++def block_box(b, w, h):
++    """色块在 w×h 画面里的像素框 (x0, y0, x1, y1)，右下不含，裁在画面内。"""
++    x0, y0 = round(b["x"] * w), round(b["y"] * h)
++    x1, y1 = round(min(1.0, b["x"] + b["w"]) * w), round(min(1.0, b["y"] + b["h"]) * h)
++    return x0, y0, max(x0 + 1, x1), max(y0 + 1, y1)
++
++
++def draw_guides(img, width):
++    d = ImageDraw.Draw(img)
++    w, h = img.size
++    for g in GUIDES:
++        x = round(g * w)
++        d.rectangle((x - width // 2, 0, x - width // 2 + width - 1, h), fill=GUIDE_COLOR)
++
++
++def render_shot(shot, font):
++    img = Image.new("RGB", (FRAME_W, FRAME_H), shot["bg"])
++    d = ImageDraw.Draw(img)
++    for b in shot["blocks"]:
++        x0, y0, x1, y1 = block_box(b, FRAME_W, FRAME_H)
++        d.rectangle((x0, y0, x1 - 1, y1 - 1), fill=b["color"])
++        if b["label"]:
++            d.text(((x0 + x1) / 2, (y0 + y1) / 2), b["label"], font=font, fill="white",
++                   anchor="mm", stroke_width=4, stroke_fill="black")
++    draw_guides(img, 6)
++    return img
++
++
++def build_sheet(shots):
++    rows = math.ceil(len(shots) / COLS)
++    sheet = Image.new("RGB", (TILE_W * COLS, TILE_H * rows), EMPTY_COLOR)
++    label_font, tag_font = load_font(64), load_font(28)
++    for i, shot in enumerate(shots):
++        tile = render_shot(shot, label_font).resize((TILE_W, TILE_H), Image.LANCZOS)
++        draw_guides(tile, 2)  # 缩小后重画一遍，保证竖线清楚、颜色纯
++        d = ImageDraw.Draw(tile)
++        box = d.textbbox((10, 6), shot["shot"], font=tag_font)
++        d.rectangle((box[0] - 6, box[1] - 4, box[2] + 6, box[3] + 4), fill=(0, 0, 0))
++        d.text((10, 6), shot["shot"], font=tag_font, fill="white")
++        sheet.paste(tile, ((i % COLS) * TILE_W, (i // COLS) * TILE_H))
++    return sheet
++
++
++def main():
++    if len(sys.argv) != 3:
++        raise Fail("用法：sketch.py <分镜JSON> <输出png>。")
++    board_path, out = need_input(sys.argv[1]), sys.argv[2]
++    need_new(out)
++    shots = load_board(board_path)
++    save_image_new(build_sheet(shots), out)
++    print(f"已画 {len(shots)} 个镜头的草图总表：{out}")
++    return 0
++
++
++if __name__ == "__main__":
++    main_wrapper(main)
+diff --git a/tests/py/_util.py b/tests/py/_util.py
+new file mode 100644
+index 0000000..eeea045
+--- /dev/null
++++ b/tests/py/_util.py
+@@ -0,0 +1,51 @@
++"""测试共用：定位 scripts/py、跑脚本、用 ffmpeg 造测试视频。路径全部从 __file__ 推出，不依赖 cwd。"""
++import json
++import os
++import subprocess
++import sys
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[2]
++PY_DIR = ROOT / "scripts" / "py"
++sys.path.insert(0, str(PY_DIR))
++
++import common  # noqa: E402  (scripts/py/common.py)
++
++ENV = dict(os.environ, PYTHONIOENCODING="utf-8")
++
++
++def run(script, *args):
++    """跑 scripts/py/<script>，返回 CompletedProcess（文本按 UTF-8 解码）。"""
++    return subprocess.run(
++        [sys.executable, str(PY_DIR / script), *map(str, args)],
++        capture_output=True, text=True, encoding="utf-8", env=ENV, cwd=str(ROOT),
++    )
++
++
++def ffmpeg(*args):
++    subprocess.run([common.ffmpeg_bin(), "-hide_banner", "-loglevel", "error", "-y", *map(str, args)],
++                   check=True)
++
++
++def make_testsrc(path, seconds=3, size="1280x720", rate=25):
++    ffmpeg("-f", "lavfi", "-i", f"testsrc=duration={seconds}:size={size}:rate={rate}",
++           "-c:v", "libx264", "-pix_fmt", "yuv420p", path)
++
++
++def probe(path):
++    out = subprocess.run(
++        [common.ffprobe_bin(), "-v", "error", "-print_format", "json", "-show_streams", "-show_format", str(path)],
++        check=True, capture_output=True, text=True, encoding="utf-8").stdout
++    return json.loads(out)
++
++
++def write_json(path, data):
++    Path(path).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
++
++
++def image(path):
++    """读图并立刻关文件（Windows 上不关会挡住临时目录清理）。"""
++    from PIL import Image
++    with Image.open(path) as im:
++        im.load()
++        return im
+diff --git a/tests/py/test_frames.py b/tests/py/test_frames.py
+new file mode 100644
+index 0000000..8b35036
+--- /dev/null
++++ b/tests/py/test_frames.py
+@@ -0,0 +1,91 @@
++import tempfile
++import unittest
++from pathlib import Path
++
++from PIL import Image
++
++from _util import ffmpeg, image, make_testsrc, run
++
++
++class FramesTest(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        cls.tmp = tempfile.TemporaryDirectory()
++        cls.dir = Path(cls.tmp.name)
++        cls.video = cls.dir / "src.mp4"
++        make_testsrc(cls.video, seconds=3)
++
++    @classmethod
++    def tearDownClass(cls):
++        cls.tmp.cleanup()
++
++    def pngs(self, d):
++        return sorted(Path(d).glob("*.png"))
++
++    def test_every(self):
++        out = self.dir / "every"
++        r = run("frames.py", "extract", self.video, out, "--every", "0.5")
++        self.assertEqual(r.returncode, 0, r.stderr)
++        self.assertEqual(len(self.pngs(out)), 6)
++        self.assertEqual(image(self.pngs(out)[0]).size, (1280, 720))
++
++    def test_around(self):
++        out = self.dir / "around"
++        r = run("frames.py", "extract", self.video, out, "--around", "1.5", "--n", "3")
++        self.assertEqual(r.returncode, 0, r.stderr)
++        files = self.pngs(out)
++        self.assertEqual(len(files), 7)
++        self.assertEqual(len({f.read_bytes() for f in files}), 7, "7 张应各不相同")
++        # 1.5 秒 × 25 帧 → 中心第 38 帧，前后各 3 帧 = 第 35..41 帧；核对首张确实是第 35 帧
++        ref = self.dir / "ref35.png"
++        ffmpeg("-i", self.video, "-vf", r"select=eq(n\,35)", "-frames:v", "1", ref)
++        self.assertEqual(files[0].name, "t0001400ms.png")
++        self.assertEqual(image(files[0]).tobytes(), image(ref).tobytes())
++
++    def test_extract_refuses_existing_frame(self):
++        out = self.dir / "clash"
++        r = run("frames.py", "extract", self.video, out, "--every", "1")
++        self.assertEqual(r.returncode, 0, r.stderr)
++        first = self.pngs(out)[0]
++        first.write_bytes(b"keep")
++        r = run("frames.py", "extract", self.video, out, "--every", "1")
++        self.assertNotEqual(r.returncode, 0)
++        self.assertEqual(first.read_bytes(), b"keep")
++        self.assertEqual(len(self.pngs(out)), 3)
++
++    def test_crop169(self):
++        src = self.dir / "sq.png"
++        Image.new("RGB", (1024, 1024), "#123456").save(src)
++        out = self.dir / "sq-169.png"
++        r = run("frames.py", "crop169", src, out)
++        self.assertEqual(r.returncode, 0, r.stderr)
++        self.assertEqual(image(out).size, (1024, 576))
++        r = run("frames.py", "crop169", src, out)
++        self.assertNotEqual(r.returncode, 0)
++
++    def test_compare(self):
++        a, b = self.dir / "a.png", self.dir / "b.png"
++        Image.new("RGB", (800, 800), "#000000").save(a)
++        img = Image.new("RGB", (800, 800), "#000000")
++        img.paste((255, 255, 255), (700, 0, 800, 100))  # 右上角那格变了
++        img.save(b)
++        out = self.dir / "cmp.png"
++        r = run("frames.py", "compare", a, b, out)
++        self.assertEqual(r.returncode, 0, r.stderr)
++        self.assertEqual(image(out).size, (1600, 800))
++        lines = [l for l in r.stdout.splitlines() if l.strip()]
++        self.assertEqual(len(lines), 6, r.stdout)  # 一行标题 + 5 个区域
++        self.assertIn("第1行第8列", lines[1])
++
++    def test_compare_refuses_existing(self):
++        a = self.dir / "a2.png"
++        Image.new("RGB", (80, 80)).save(a)
++        out = self.dir / "cmp2.png"
++        out.write_bytes(b"keep")
++        r = run("frames.py", "compare", a, a, out)
++        self.assertNotEqual(r.returncode, 0)
++        self.assertEqual(out.read_bytes(), b"keep")
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/py/test_grayscale.py b/tests/py/test_grayscale.py
+new file mode 100644
+index 0000000..3605192
+--- /dev/null
++++ b/tests/py/test_grayscale.py
+@@ -0,0 +1,75 @@
++import tempfile
++import unittest
++from pathlib import Path
++
++from PIL import Image
++
++from _util import image, run, write_json
++
++
++def board(bg, color):
++    return [{"shot": "S01", "bg": bg,
++             "blocks": [{"x": 0.62, "y": 0.4, "w": 0.1, "h": 0.5, "color": color, "label": "邮差"}]}]
++
++
++class GrayscaleTest(unittest.TestCase):
++    def setUp(self):
++        self.tmp = tempfile.TemporaryDirectory()
++        self.dir = Path(self.tmp.name)
++
++    def tearDown(self):
++        self.tmp.cleanup()
++
++    def sketch(self, data, name):
++        b = self.dir / f"{name}.json"
++        write_json(b, data)
++        png = self.dir / f"{name}.png"
++        r = run("sketch.py", b, png)
++        self.assertEqual(r.returncode, 0, r.stderr)
++        return b, png
++
++    def test_dark_red_on_dark_blue_fails(self):
++        b, png = self.sketch(board("#1d2a3a", "#8b0000"), "low")
++        out = self.dir / "low-gray.png"
++        r = run("grayscale.py", png, out, "--board", b)
++        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
++        self.assertIn("S01", r.stdout)
++        self.assertIn("邮差", r.stdout)
++        self.assertEqual(image(out).mode, "L")
++
++    def test_white_on_black_passes(self):
++        b, png = self.sketch(board("#000000", "#ffffff"), "high")
++        r = run("grayscale.py", png, self.dir / "high-gray.png", "--board", b)
++        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
++
++    def test_full_frame_image(self):
++        # 单镜 16:9 整图（不是总表）也按比例取块
++        img = Image.new("RGB", (1920, 1080), "#000000")
++        img.paste((255, 255, 255), (int(0.62 * 1920), int(0.4 * 1080), int(0.72 * 1920), int(0.9 * 1080)))
++        src = self.dir / "frame.png"
++        img.save(src)
++        b = self.dir / "b.json"
++        write_json(b, board("#000000", "#ffffff"))
++        r = run("grayscale.py", src, self.dir / "g.png", "--board", b, "--min-contrast", "0.25")
++        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
++
++    def test_without_board_just_converts(self):
++        src = self.dir / "a.png"
++        Image.new("RGB", (64, 36), "#c0392b").save(src)
++        out = self.dir / "a-gray.png"
++        r = run("grayscale.py", src, out)
++        self.assertEqual(r.returncode, 0, r.stderr)
++        self.assertEqual(image(out).mode, "L")
++
++    def test_refuses_existing_output(self):
++        src = self.dir / "a.png"
++        Image.new("RGB", (64, 36)).save(src)
++        out = self.dir / "a-gray.png"
++        out.write_bytes(b"keep")
++        r = run("grayscale.py", src, out)
++        self.assertNotEqual(r.returncode, 0)
++        self.assertEqual(out.read_bytes(), b"keep")
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/py/test_post.py b/tests/py/test_post.py
+new file mode 100644
+index 0000000..6ce053e
+--- /dev/null
++++ b/tests/py/test_post.py
+@@ -0,0 +1,105 @@
++import tempfile
++import unittest
++from pathlib import Path
++
++from _util import ffmpeg, image, make_testsrc, probe, run
++
++
++def video_stream(info):
++    return next(s for s in info["streams"] if s["codec_type"] == "video")
++
++
++class PostTest(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        cls.tmp = tempfile.TemporaryDirectory()
++        cls.dir = Path(cls.tmp.name)
++        cls.a = cls.dir / "a.mp4"
++        cls.b = cls.dir / "b 片段.mp4"  # 带空格和中文
++        make_testsrc(cls.a, seconds=1)
++        ffmpeg("-f", "lavfi", "-i", "testsrc2=duration=1:size=1280x720:rate=25",
++               "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
++               "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", cls.b)
++        cls.list = cls.dir / "list.txt"
++        cls.list.write_text(f"# 顺序\na.mp4\n{cls.b.name}\n", encoding="utf-8")
++        cls.final = cls.dir / "final.mp4"
++        cls.concat = run("post.py", "concat", cls.list, cls.final)
++
++    @classmethod
++    def tearDownClass(cls):
++        cls.tmp.cleanup()
++
++    def test_concat(self):
++        self.assertEqual(self.concat.returncode, 0, self.concat.stderr)
++        info = probe(self.final)
++        v = video_stream(info)
++        self.assertEqual((v["width"], v["height"]), (1920, 1080))
++        self.assertEqual(v["codec_name"], "h264")
++        self.assertEqual(v["pix_fmt"], "yuv420p")
++        self.assertEqual(v.get("color_space"), "bt709")
++        self.assertEqual(v.get("color_primaries"), "bt709")
++        self.assertEqual(v.get("color_transfer"), "bt709")
++        self.assertAlmostEqual(float(info["format"]["duration"]), 2.0, delta=0.15)
++        self.assertTrue(any(s["codec_type"] == "audio" for s in info["streams"]))
++        leftovers = [p for p in self.dir.iterdir() if p.name.startswith(".post-")]
++        self.assertEqual(leftovers, [], "中间文件应清理掉")
++
++    def test_concat_keeps_color(self):
++        # 无标签的 BT.601 红色素材，拼接放大后按 bt709 解码，颜色应基本不变
++        src = self.dir / "red.mp4"
++        ffmpeg("-f", "lavfi", "-i", "color=c=0xc0392b:s=1280x720:r=25:d=1",
++               "-vf", "scale=out_color_matrix=bt601:out_range=tv,format=yuv420p",
++               "-c:v", "libx264", "-qp", "0", src)
++        lst = self.dir / "red.txt"
++        lst.write_text("red.mp4\n", encoding="utf-8")
++        out = self.dir / "red-final.mp4"
++        r = run("post.py", "concat", lst, out)
++        self.assertEqual(r.returncode, 0, r.stderr)
++        png = self.dir / "red-final.png"
++        ffmpeg("-i", out, "-frames:v", "1", "-vf", "scale=in_color_matrix=bt709:in_range=tv,format=rgb24", png)
++        px = image(png).convert("RGB").getpixel((960, 540))
++        for got, want in zip(px, (0xc0, 0x39, 0x2b)):
++            self.assertLessEqual(abs(got - want), 4, px)
++
++    def test_concat_refuses_existing(self):
++        out = self.dir / "exists.mp4"
++        out.write_bytes(b"keep")
++        r = run("post.py", "concat", self.list, out)
++        self.assertNotEqual(r.returncode, 0)
++        self.assertEqual(out.read_bytes(), b"keep")
++
++    def test_concat_missing_clip(self):
++        bad = self.dir / "bad.txt"
++        bad.write_text("a.mp4\nnope.mp4\n", encoding="utf-8")
++        out = self.dir / "bad.mp4"
++        r = run("post.py", "concat", bad, out)
++        self.assertNotEqual(r.returncode, 0)
++        self.assertFalse(out.exists())
++
++    def test_grade(self):
++        out = self.dir / "graded.mp4"
++        r = run("post.py", "grade", self.a, out, "--sat", "1.2", "--bright", "0.05")
++        self.assertEqual(r.returncode, 0, r.stderr)
++        v = video_stream(probe(out))
++        self.assertEqual((v["width"], v["height"]), (1280, 720))
++        r = run("post.py", "grade", self.a, out, "--sat", "1.2")
++        self.assertNotEqual(r.returncode, 0)
++
++    def test_trim(self):
++        self.assertEqual(self.concat.returncode, 0, self.concat.stderr)
++        out = self.dir / "trim.mp4"
++        r = run("post.py", "trim", self.final, out, "--start", "0.5", "--end", "1.5")
++        self.assertEqual(r.returncode, 0, r.stderr)
++        self.assertAlmostEqual(float(probe(out)["format"]["duration"]), 1.0, delta=0.15)
++        before = out.read_bytes()
++        r = run("post.py", "trim", self.final, out, "--start", "0", "--end", "1")
++        self.assertNotEqual(r.returncode, 0)
++        self.assertEqual(out.read_bytes(), before)
++
++    def test_trim_bad_range(self):
++        r = run("post.py", "trim", self.a, self.dir / "t2.mp4", "--start", "2", "--end", "1")
++        self.assertNotEqual(r.returncode, 0)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/py/test_sketch.py b/tests/py/test_sketch.py
+new file mode 100644
+index 0000000..d0878d5
+--- /dev/null
++++ b/tests/py/test_sketch.py
+@@ -0,0 +1,64 @@
++import tempfile
++import unittest
++from pathlib import Path
++
++from PIL import Image
++
++from _util import image, run, write_json
++
++BOARD = [
++    {"shot": "S01", "bg": "#1d2a3a",
++     "blocks": [{"x": 0.62, "y": 0.4, "w": 0.1, "h": 0.5, "color": "#c0392b", "label": "邮差"}]},
++    {"shot": "S02", "bg": "#000000", "blocks": [{"x": 0.1, "y": 0.1, "w": 0.2, "h": 0.2, "color": "#ffffff"}]},
++    {"shot": "S03", "bg": "#335533", "blocks": []},
++]
++
++
++class SketchTest(unittest.TestCase):
++    def setUp(self):
++        self.tmp = tempfile.TemporaryDirectory()
++        self.dir = Path(self.tmp.name)
++        self.board = self.dir / "board.json"
++        write_json(self.board, BOARD)
++
++    def tearDown(self):
++        self.tmp.cleanup()
++
++    def test_sheet_size_and_guides(self):
++        from sketch import GUIDE_COLOR, TILE_W, TILE_H
++        out = self.dir / "sheet.png"
++        r = run("sketch.py", self.board, out)
++        self.assertEqual(r.returncode, 0, r.stderr)
++        img = image(out).convert("RGB")
++        self.assertEqual(img.size, (1920, 360))
++        for col in range(3):
++            for frac in (0.38, 0.62):
++                x = col * TILE_W + round(frac * TILE_W)
++                self.assertEqual(img.getpixel((x, TILE_H // 2)), GUIDE_COLOR, (col, frac))
++        # 背景色确实画上了（S03 的一角，避开镜头号）
++        self.assertEqual(img.getpixel((2 * TILE_W + 600, 340)), (0x33, 0x55, 0x33))
++
++    def test_two_rows(self):
++        out = self.dir / "sheet4.png"
++        write_json(self.board, BOARD + [{"shot": "S04", "bg": "#000000", "blocks": []}])
++        r = run("sketch.py", self.board, out)
++        self.assertEqual(r.returncode, 0, r.stderr)
++        self.assertEqual(image(out).size, (1920, 720))
++
++    def test_refuses_existing_output(self):
++        out = self.dir / "sheet.png"
++        out.write_bytes(b"keep")
++        r = run("sketch.py", self.board, out)
++        self.assertNotEqual(r.returncode, 0)
++        self.assertEqual(out.read_bytes(), b"keep")
++        self.assertIn("已存在", r.stderr)
++
++    def test_bad_board(self):
++        write_json(self.board, {"shot": "S01"})
++        r = run("sketch.py", self.board, self.dir / "x.png")
++        self.assertNotEqual(r.returncode, 0)
++        self.assertFalse((self.dir / "x.png").exists())
++
++
++if __name__ == "__main__":
++    unittest.main()

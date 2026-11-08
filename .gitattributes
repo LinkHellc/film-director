@@ -2,3 +2,5 @@
 * text=auto eol=lf
 *.cmd text eol=crlf
 *.ps1 text eol=crlf
+# 片子目录按字节原样保存：审核记录里有文件哈希，换行转换会让哈希对不上。
+films/** -text

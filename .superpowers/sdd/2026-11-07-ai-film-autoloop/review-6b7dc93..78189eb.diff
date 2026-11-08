@@ -1,0 +1,439 @@
+# Review package: 6b7dc93..HEAD
+
+## Commits
+78189eb feat: 片子状态与开新片
+
+## Files changed
+ scripts/lib/hub.ts     |  48 +++++++++++++++
+ scripts/lib/state.ts   |  53 +++++++++++++++++
+ scripts/new-film.ts    |  76 +++++++++++++++++++++++
+ tests/new-film.test.ts | 159 +++++++++++++++++++++++++++++++++++++++++++++++++
+ tests/state.test.ts    |  59 ++++++++++++++++++
+ 5 files changed, 395 insertions(+)
+
+## Diff
+diff --git a/scripts/lib/hub.ts b/scripts/lib/hub.ts
+new file mode 100644
+index 0000000..ccdc65f
+--- /dev/null
++++ b/scripts/lib/hub.ts
+@@ -0,0 +1,48 @@
++export interface HubEvent {
++  id: string;
++  type: string;
++  subject: string;
++  summary: string;
++}
++
++/** 中台地址：AGENT_AUTOLOOP_URL，默认 http://127.0.0.1:3350（去掉末尾斜杠）。 */
++export function hubUrl(): string {
++  return (process.env.AGENT_AUTOLOOP_URL || "http://127.0.0.1:3350").replace(/\/+$/, "");
++}
++
++/** 截到前 n 个字（按码点，不切断代理对）。 */
++export function firstChars(s: string, n: number): string {
++  return Array.from(s).slice(0, n).join("");
++}
++
++/**
++ * 用来源密钥 AGENT_AUTOLOOP_FILM_KEY 向中台 POST /v1/events。
++ * 缺密钥、网络失败、非 2xx、回复里没有数字 event 时抛错（信息为中文，不含密钥）。
++ */
++export async function emitEvent(event: HubEvent): Promise<{ event: number }> {
++  const key = process.env.AGENT_AUTOLOOP_FILM_KEY;
++  if (!key) throw new Error("缺少 AGENT_AUTOLOOP_FILM_KEY");
++  const body = JSON.stringify({ ...event, summary: firstChars(event.summary, 200) });
++  let res: Response;
++  try {
++    res = await fetch(`${hubUrl()}/v1/events`, {
++      method: "POST",
++      headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
++      body,
++      signal: AbortSignal.timeout(15_000),
++    });
++  } catch (err) {
++    throw new Error(`连不上中台 ${hubUrl()}（${(err as Error).message}）`);
++  }
++  const text = await res.text();
++  if (!res.ok) throw new Error(`中台返回 ${res.status}`);
++  let parsed: unknown;
++  try {
++    parsed = JSON.parse(text);
++  } catch {
++    throw new Error("中台回复不是 JSON");
++  }
++  const n = (parsed as { event?: unknown }).event;
++  if (typeof n !== "number") throw new Error("中台回复里没有事件编号");
++  return { event: n };
++}
+diff --git a/scripts/lib/state.ts b/scripts/lib/state.ts
+new file mode 100644
+index 0000000..86c5a74
+--- /dev/null
++++ b/scripts/lib/state.ts
+@@ -0,0 +1,53 @@
++import { readFileSync, renameSync, writeFileSync } from "node:fs";
++import { join } from "node:path";
++import { filmDir } from "./paths.ts";
++
++export type Stage =
++  | "setup" | "story" | "board" | "style" | "keyframes"
++  | "prompts" | "generate" | "post" | "wrap" | "done";
++export type GateId = "G0" | "G1" | "G2" | "G3" | "G3b" | "G4" | "G5" | "G6";
++export type GateState = "pending" | "asked" | "approved" | "rejected";
++
++export interface Shot {
++  seconds: number;
++  status: string;
++  clip: string | null;
++}
++
++export interface FilmState {
++  film: string;
++  stage: Stage;
++  settings: {
++    seconds: number | null;
++    aspect: string;
++    budgetCNY: number | null;
++    music: string | null;
++    subtitles: boolean;
++    model: "mini" | "2.5";
++  };
++  gates: Partial<Record<GateId, GateState>>;
++  shots: Record<string, Shot>; // 键形如 "S01"
++  spentCNY: number;
++}
++
++function statePath(film: string): string {
++  return join(filmDir(film), "state.json");
++}
++
++/** 读 films/<片名>/state.json。 */
++export function readState(film: string): FilmState {
++  return JSON.parse(readFileSync(statePath(film), "utf8")) as FilmState;
++}
++
++/** 原地更新 state.json：先写 state.json.tmp 再 rename，避免写一半。 */
++export function writeState(state: FilmState): void {
++  const path = statePath(state.film);
++  const tmp = `${path}.tmp`;
++  writeFileSync(tmp, JSON.stringify(state, null, 2) + "\n");
++  renameSync(tmp, path);
++}
++
++/** 只有 "approved" 算批准；缺失关口返回 false。 */
++export function isApproved(state: FilmState, gate: GateId): boolean {
++  return state.gates[gate] === "approved";
++}
+diff --git a/scripts/new-film.ts b/scripts/new-film.ts
+new file mode 100644
+index 0000000..f9e2387
+--- /dev/null
++++ b/scripts/new-film.ts
+@@ -0,0 +1,76 @@
++import { mkdirSync } from "node:fs";
++import { dirname, join } from "node:path";
++import { filmDir } from "./lib/paths.ts";
++import { writeNew } from "./lib/versioned.ts";
++import { writeState, type FilmState } from "./lib/state.ts";
++import { emitEvent, firstChars } from "./lib/hub.ts";
++
++const SUBDIRS = ["story", "board", "style", "shots", "reviews", "quotes", "approvals", "post", "out"];
++const USAGE = '用法：new-film.ts <片名> "<一句话想法>" [--no-emit]';
++
++function human(p: string): string {
++  return p.replace(/\\/g, "/");
++}
++
++export async function main(argv: string[]): Promise<number> {
++  const noEmit = argv.includes("--no-emit");
++  const args = argv.filter((a) => a !== "--no-emit");
++  const [film, idea] = args;
++  if (args.length !== 2 || !film || !idea || !idea.trim()) {
++    console.error(USAGE);
++    return 2;
++  }
++
++  let dir: string;
++  try {
++    dir = filmDir(film);
++  } catch (err) {
++    console.error((err as Error).message);
++    return 2;
++  }
++
++  // 非递归 mkdir：目录已存在就 EEXIST，什么都不动。
++  mkdirSync(dirname(dir), { recursive: true });
++  try {
++    mkdirSync(dir);
++  } catch (err) {
++    if ((err as NodeJS.ErrnoException).code === "EEXIST") {
++      console.error(`片子已存在：${human(dir)}，没有改动任何文件。`);
++      return 1;
++    }
++    throw err;
++  }
++
++  for (const d of SUBDIRS) mkdirSync(join(dir, d));
++  writeNew(join(dir, "brief.md"), `${idea}\n`);
++  writeNew(join(dir, "requirements.md"), `# 本人要求\n\n- ${idea}\n`);
++  const state: FilmState = {
++    film,
++    stage: "setup",
++    settings: { seconds: null, aspect: "16:9", budgetCNY: null, music: null, subtitles: false, model: "mini" },
++    gates: {},
++    shots: {},
++    spentCNY: 0,
++  };
++  writeState(state);
++
++  if (noEmit) {
++    console.log(`已开新片：${human(dir)}（没有通知中台）。`);
++    return 0;
++  }
++  try {
++    const { event } = await emitEvent({
++      id: `film.new:${film}`,
++      type: "film.new",
++      subject: `film:${film}`,
++      summary: firstChars(idea, 200),
++    });
++    console.log(`已开新片：${human(dir)}，已通知中台（事件 ${event}）。`);
++    return 0;
++  } catch (err) {
++    console.error(`没有发出事件：${(err as Error).message}（片子目录已建好：${human(dir)}）。`);
++    return 1;
++  }
++}
++
++if (import.meta.main) process.exit(await main(process.argv.slice(2)));
+diff --git a/tests/new-film.test.ts b/tests/new-film.test.ts
+new file mode 100644
+index 0000000..7993ac6
+--- /dev/null
++++ b/tests/new-film.test.ts
+@@ -0,0 +1,159 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync, statSync } from "node:fs";
++import { createServer, type IncomingMessage } from "node:http";
++import type { AddressInfo } from "node:net";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { main } from "../scripts/new-film.ts";
++import { readState } from "../scripts/lib/state.ts";
++
++const SUBDIRS = ["story", "board", "style", "shots", "reviews", "quotes", "approvals", "post", "out"];
++const ENV_KEYS = ["FILM_ROOT", "AGENT_AUTOLOOP_URL", "AGENT_AUTOLOOP_FILM_KEY"] as const;
++
++/** 临时 FILM_ROOT + 环境变量保存/恢复 + 捕获 console 输出。 */
++async function withEnv(
++  env: Partial<Record<(typeof ENV_KEYS)[number], string | undefined>>,
++  fn: (root: string, out: string[]) => Promise<void>,
++): Promise<void> {
++  const root = mkdtempSync(join(tmpdir(), "film-new-"));
++  const saved = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
++  const out: string[] = [];
++  const log = console.log;
++  const err = console.error;
++  console.log = (...a: unknown[]) => void out.push(a.join(" "));
++  console.error = (...a: unknown[]) => void out.push(a.join(" "));
++  try {
++    process.env.FILM_ROOT = root;
++    for (const k of ["AGENT_AUTOLOOP_URL", "AGENT_AUTOLOOP_FILM_KEY"] as const) {
++      if (env[k] === undefined) delete process.env[k];
++      else process.env[k] = env[k];
++    }
++    await fn(root, out);
++  } finally {
++    console.log = log;
++    console.error = err;
++    for (const k of ENV_KEYS) {
++      if (saved[k] === undefined) delete process.env[k];
++      else process.env[k] = saved[k];
++    }
++    rmSync(root, { recursive: true, force: true });
++  }
++}
++
++const IDEA = "一个雨夜邮差把最后一封信送给了自己。";
++
++test("--no-emit 建出全部目录和三个文件，stage 为 setup", async () => {
++  await withEnv({}, async (root) => {
++    const code = await main(["测试片", IDEA, "--no-emit"]);
++    assert.equal(code, 0);
++    const dir = join(root, "films", "测试片");
++    for (const d of SUBDIRS) assert.ok(statSync(join(dir, d)).isDirectory(), d);
++    assert.equal(readFileSync(join(dir, "brief.md"), "utf8").trim(), IDEA);
++    const req = readFileSync(join(dir, "requirements.md"), "utf8").split(/\r?\n/);
++    assert.equal(req[0], "# 本人要求");
++    const firstItem = req.find((l) => l.startsWith("- "));
++    assert.equal(firstItem, `- ${IDEA}`);
++    const s = readState("测试片");
++    assert.equal(s.film, "测试片");
++    assert.equal(s.stage, "setup");
++    assert.deepEqual(s.settings, {
++      seconds: null, aspect: "16:9", budgetCNY: null, music: null, subtitles: false, model: "mini",
++    });
++    assert.deepEqual(s.gates, {});
++    assert.deepEqual(s.shots, {});
++    assert.equal(s.spentCNY, 0);
++  });
++});
++
++test("片子目录已存在时返回非零且不改动已有文件", async () => {
++  await withEnv({}, async (root, out) => {
++    const dir = join(root, "films", "测试片");
++    mkdirSync(dir, { recursive: true });
++    writeFileSync(join(dir, "brief.md"), "旧想法");
++    const code = await main(["测试片", IDEA, "--no-emit"]);
++    assert.notEqual(code, 0);
++    assert.equal(readFileSync(join(dir, "brief.md"), "utf8"), "旧想法");
++    assert.deepEqual(readdirSync(dir), ["brief.md"]);
++    assert.match(out.join("\n"), /已存在/);
++  });
++});
++
++test("片名不合法或缺参数时返回非零且不建目录", async () => {
++  await withEnv({}, async (root, out) => {
++    assert.notEqual(await main(["../x", IDEA, "--no-emit"]), 0);
++    assert.match(out.join("\n"), /片名不合法：\.\.\/x/);
++    assert.notEqual(await main(["测试片"]), 0);
++    assert.equal(existsSync(join(root, "films", "测试片")), false);
++  });
++});
++
++test("发事件到假中台：subject、Authorization 和事件体正确", async () => {
++  const got: { auth?: string; url?: string; method?: string; body?: any } = {};
++  const server = createServer((req: IncomingMessage, res) => {
++    let raw = "";
++    req.setEncoding("utf8");
++    req.on("data", (c) => (raw += c));
++    req.on("end", () => {
++      got.auth = req.headers.authorization;
++      got.url = req.url;
++      got.method = req.method;
++      got.body = JSON.parse(raw);
++      res.writeHead(200, { "content-type": "application/json" });
++      res.end(JSON.stringify({ event: 7, duplicate: false, routed: [] }));
++    });
++  });
++  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
++  const port = (server.address() as AddressInfo).port;
++  try {
++    const longIdea = "长".repeat(250);
++    await withEnv(
++      { AGENT_AUTOLOOP_URL: `http://127.0.0.1:${port}`, AGENT_AUTOLOOP_FILM_KEY: "k-test-123" },
++      async (root, out) => {
++        const code = await main(["测试片", longIdea]);
++        assert.equal(code, 0);
++        assert.equal(got.method, "POST");
++        assert.equal(got.url, "/v1/events");
++        assert.equal(got.auth, "Bearer k-test-123");
++        assert.equal(got.body.subject, "film:测试片");
++        assert.equal(got.body.id, "film.new:测试片");
++        assert.equal(got.body.type, "film.new");
++        assert.equal(got.body.summary, "长".repeat(200));
++        assert.ok(existsSync(join(root, "films", "测试片", "state.json")));
++        assert.match(out.join("\n"), /事件 7/);
++      },
++    );
++  } finally {
++    await new Promise<void>((r) => server.close(() => r()));
++  }
++});
++
++test("没设 AGENT_AUTOLOOP_FILM_KEY 时目录照建，退出码非零并说明原因", async () => {
++  await withEnv({ AGENT_AUTOLOOP_URL: "http://127.0.0.1:9" }, async (root, out) => {
++    const code = await main(["测试片", IDEA]);
++    assert.notEqual(code, 0);
++    assert.ok(existsSync(join(root, "films", "测试片", "state.json")));
++    assert.match(out.join("\n"), /没有发出事件：缺少 AGENT_AUTOLOOP_FILM_KEY/);
++  });
++});
++
++test("中台返回非 200 时退出码非零并说明没有发出事件", async () => {
++  const server = createServer((_req, res) => {
++    res.writeHead(401);
++    res.end("no");
++  });
++  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
++  const port = (server.address() as AddressInfo).port;
++  try {
++    await withEnv(
++      { AGENT_AUTOLOOP_URL: `http://127.0.0.1:${port}`, AGENT_AUTOLOOP_FILM_KEY: "bad" },
++      async (_root, out) => {
++        const code = await main(["测试片", IDEA]);
++        assert.notEqual(code, 0);
++        assert.match(out.join("\n"), /没有发出事件：.*401/);
++      },
++    );
++  } finally {
++    await new Promise<void>((r) => server.close(() => r()));
++  }
++});
+diff --git a/tests/state.test.ts b/tests/state.test.ts
+new file mode 100644
+index 0000000..d3372b5
+--- /dev/null
++++ b/tests/state.test.ts
+@@ -0,0 +1,59 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { mkdtempSync, mkdirSync, rmSync, existsSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { readState, writeState, isApproved, type FilmState } from "../scripts/lib/state.ts";
++import { filmDir } from "../scripts/lib/paths.ts";
++
++function withRoot(fn: (root: string) => void): void {
++  const root = mkdtempSync(join(tmpdir(), "film-state-"));
++  const old = process.env.FILM_ROOT;
++  try {
++    process.env.FILM_ROOT = root;
++    fn(root);
++  } finally {
++    if (old === undefined) delete process.env.FILM_ROOT;
++    else process.env.FILM_ROOT = old;
++    rmSync(root, { recursive: true, force: true });
++  }
++}
++
++function sample(): FilmState {
++  return {
++    film: "测试片",
++    stage: "board",
++    settings: { seconds: 30, aspect: "16:9", budgetCNY: 50, music: null, subtitles: true, model: "mini" },
++    gates: { G0: "approved", G1: "asked" },
++    shots: { S01: { seconds: 4.4, status: "planned", clip: null } },
++    spentCNY: 2.5,
++  };
++}
++
++test("writeState 再 readState 得到同一对象，且不留 .tmp", () => {
++  withRoot(() => {
++    mkdirSync(filmDir("测试片"), { recursive: true });
++    const s = sample();
++    writeState(s);
++    assert.deepEqual(readState("测试片"), s);
++    // 原地更新
++    s.stage = "style";
++    s.gates.G1 = "approved";
++    writeState(s);
++    assert.deepEqual(readState("测试片"), s);
++    assert.equal(existsSync(join(filmDir("测试片"), "state.json.tmp")), false);
++  });
++});
++
++test("isApproved 对缺失关口返回 false，只有 approved 算批准", () => {
++  const s = sample();
++  assert.equal(isApproved(s, "G0"), true);
++  assert.equal(isApproved(s, "G1"), false);
++  assert.equal(isApproved(s, "G3b"), false);
++  s.gates.G2 = "rejected";
++  assert.equal(isApproved(s, "G2"), false);
++});
++
++test("readState 片名不合法时抛错", () => {
++  assert.throws(() => readState("../x"), { message: "片名不合法：../x" });
++});

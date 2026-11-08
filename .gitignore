@@ -1,6 +1,4 @@
-films/
 .venv/
 *.env
 node_modules/
-.superpowers/
 __pycache__/

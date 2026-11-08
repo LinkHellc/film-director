@@ -1,0 +1,396 @@
+# Review package: 3ad866b..HEAD
+
+## Commits
+89238a8 feat: 官方 Claude 包装
+
+## Files changed
+ scripts/bin/claude-official.cmd |   2 +
+ scripts/bin/claude-official.js  | 132 ++++++++++++++++++++++++++++++
+ scripts/bin/login-official.ps1  |  20 +++++
+ tests/claude-official.test.ts   | 175 ++++++++++++++++++++++++++++++++++++++++
+ tests/fakes/claude-cli.js       |  23 ++++++
+ 5 files changed, 352 insertions(+)
+
+## Diff
+diff --git a/scripts/bin/claude-official.cmd b/scripts/bin/claude-official.cmd
+new file mode 100644
+index 0000000..f31b4b3
+--- /dev/null
++++ b/scripts/bin/claude-official.cmd
+@@ -0,0 +1,2 @@
++@echo off
++node "%~dp0\claude-official.js" %*
+diff --git a/scripts/bin/claude-official.js b/scripts/bin/claude-official.js
+new file mode 100644
+index 0000000..12ffcc4
+--- /dev/null
++++ b/scripts/bin/claude-official.js
+@@ -0,0 +1,132 @@
++// 用独立配置目录运行 Anthropic 官方 Claude Code，绕开全局 ~/.claude/settings.json 里的网关设置（不改那个文件）。
++// 用法：claude-official.js [任意参数...]  —— 参数原样传给真正的 claude。
++import { spawn } from "node:child_process";
++import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
++import { homedir } from "node:os";
++import { delimiter, dirname, join, resolve } from "node:path";
++
++/** autoloop 用来从 .cmd 包装里认出 js 入口的正则（照抄）。 */
++export const CMD_JS_RE = /"%(?:dp0%|~dp0)\\?([^"\r\n]+\.(?:[cm]?js))"\s+%\*/i;
++
++/** 要删掉的网关变量。 */
++export const STRIPPED_VARS = [
++  "ANTHROPIC_BASE_URL",
++  "ANTHROPIC_AUTH_TOKEN",
++  "ANTHROPIC_MODEL",
++  "ANTHROPIC_SMALL_FAST_MODEL",
++  "ANTHROPIC_DEFAULT_HAIKU_MODEL",
++  "ANTHROPIC_DEFAULT_SONNET_MODEL",
++  "ANTHROPIC_DEFAULT_OPUS_MODEL",
++];
++
++function isFile(p) {
++  try {
++    return statSync(p).isFile();
++  } catch {
++    return false;
++  }
++}
++
++/** 从 npm 风格的 .cmd 包装里解析出 js 入口的绝对路径（相对 .cmd 所在目录）；解析不出返回 null。 */
++export function cliFromCmd(cmdPath) {
++  let text;
++  try {
++    text = readFileSync(cmdPath, "utf8");
++  } catch {
++    return null;
++  }
++  const m = CMD_JS_RE.exec(text);
++  return m ? resolve(dirname(cmdPath), m[1]) : null;
++}
++
++/** 在 PATH 里找文件，返回第一个存在的绝对路径。 */
++function findOnPath(name, pathValue) {
++  for (const dir of (pathValue ?? "").split(delimiter)) {
++    if (!dir) continue;
++    const p = join(dir.replace(/^"(.*)"$/, "$1"), name);
++    if (isFile(p)) return resolve(p);
++  }
++  return null;
++}
++
++/** 大小写无关地取环境变量（复制出来的 env 对象在 Windows 上不再大小写无关）。 */
++function getVar(env, name) {
++  const key = Object.keys(env).find((k) => k.toUpperCase() === name);
++  return key === undefined ? undefined : env[key];
++}
++
++function deleteVar(env, name) {
++  for (const k of Object.keys(env)) if (k.toUpperCase() === name) delete env[k];
++}
++
++function setVar(env, name, value) {
++  deleteVar(env, name);
++  env[name] = value;
++}
++
++/** 找真正的 claude cli.js：FILM_REAL_CLAUDE 优先，否则 PATH 里的 claude.cmd。 */
++export function findRealClaude(env) {
++  const explicit = getVar(env, "FILM_REAL_CLAUDE");
++  if (explicit && isFile(explicit)) return resolve(explicit);
++  const cmd = findOnPath("claude.cmd", getVar(env, "PATH"));
++  if (cmd) {
++    const cli = cliFromCmd(cmd);
++    if (cli && isFile(cli)) return cli;
++  }
++  return null;
++}
++
++/** git bash：已有 CLAUDE_CODE_GIT_BASH_PATH 保留；否则 FILM_GIT_BASH；否则由 PATH 里的 git.exe 推出 ..\bin\bash.exe（存在才用）。 */
++export function findGitBash(env) {
++  const existing = getVar(env, "CLAUDE_CODE_GIT_BASH_PATH");
++  if (existing) return existing;
++  const film = getVar(env, "FILM_GIT_BASH");
++  if (film) return film;
++  const git = findOnPath("git.exe", getVar(env, "PATH"));
++  if (git) {
++    const bash = resolve(dirname(git), "..", "bin", "bash.exe");
++    if (isFile(bash)) return bash;
++  }
++  return null;
++}
++
++/** 组装给真正 claude 的环境。 */
++export function buildEnv(source) {
++  const env = { ...source };
++  for (const name of STRIPPED_VARS) deleteVar(env, name);
++  const userProfile = getVar(env, "USERPROFILE") || homedir();
++  const configDir = getVar(env, "FILM_CLAUDE_CONFIG_DIR") || join(userProfile, ".claude-film");
++  mkdirSync(configDir, { recursive: true });
++  setVar(env, "CLAUDE_CONFIG_DIR", configDir);
++  const bash = findGitBash(env);
++  if (bash) setVar(env, "CLAUDE_CODE_GIT_BASH_PATH", bash);
++  return env;
++}
++
++function main(args) {
++  const env = buildEnv(process.env);
++  const cli = findRealClaude(env);
++  if (!cli) {
++    process.stderr.write("找不到 claude：请装 Claude Code 或设置 FILM_REAL_CLAUDE\n");
++    process.exit(127);
++  }
++  const child = spawn(process.execPath, [cli, ...args], { stdio: "inherit", env });
++  const forward = (sig) => {
++    try {
++      child.kill(sig);
++    } catch {
++      // 子进程可能已经退出
++    }
++  };
++  process.on("SIGINT", () => forward("SIGINT"));
++  process.on("SIGTERM", () => forward("SIGTERM"));
++  child.on("error", (err) => {
++    process.stderr.write(`启动 claude 失败：${err.message}\n`);
++    process.exit(1);
++  });
++  child.on("exit", (code, signal) => {
++    process.exit(signal ? 1 : (code ?? 1));
++  });
++}
++
++if (import.meta.main) main(process.argv.slice(2));
+diff --git a/scripts/bin/login-official.ps1 b/scripts/bin/login-official.ps1
+new file mode 100644
+index 0000000..3dba3f7
+--- /dev/null
++++ b/scripts/bin/login-official.ps1
+@@ -0,0 +1,20 @@
++﻿# 在独立配置目录 ~/.claude-film 里打开官方 Claude Code，用来 /login。不改 ~/.claude 的任何配置。
++foreach ($name in 'ANTHROPIC_BASE_URL','ANTHROPIC_AUTH_TOKEN','ANTHROPIC_MODEL','ANTHROPIC_SMALL_FAST_MODEL','ANTHROPIC_DEFAULT_HAIKU_MODEL','ANTHROPIC_DEFAULT_SONNET_MODEL','ANTHROPIC_DEFAULT_OPUS_MODEL') {
++    Remove-Item "Env:$name" -ErrorAction SilentlyContinue
++}
++$env:CLAUDE_CONFIG_DIR = Join-Path $env:USERPROFILE '.claude-film'
++# git bash：已有 CLAUDE_CODE_GIT_BASH_PATH 就保留；否则用 FILM_GIT_BASH；否则由 PATH 里的 git.exe 推出 ..\bin\bash.exe（存在才设置）。与 claude-official.js 相同。
++if (-not $env:CLAUDE_CODE_GIT_BASH_PATH) {
++    if ($env:FILM_GIT_BASH) {
++        $env:CLAUDE_CODE_GIT_BASH_PATH = $env:FILM_GIT_BASH
++    } else {
++        $git = Get-Command git.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
++        if ($git) {
++            $bash = Join-Path (Split-Path (Split-Path $git.Source -Parent) -Parent) 'bin\bash.exe'
++            if (Test-Path -LiteralPath $bash -PathType Leaf) { $env:CLAUDE_CODE_GIT_BASH_PATH = $bash }
++        }
++    }
++}
++Write-Host "配置目录：$env:CLAUDE_CONFIG_DIR"
++Write-Host '打开后输入 /login 用官方账号登录，登录完输入 /exit 退出。'
++claude
+diff --git a/tests/claude-official.test.ts b/tests/claude-official.test.ts
+new file mode 100644
+index 0000000..0013b43
+--- /dev/null
++++ b/tests/claude-official.test.ts
+@@ -0,0 +1,175 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { spawnSync } from "node:child_process";
++import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, statSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join, resolve, dirname } from "node:path";
++import { fileURLToPath } from "node:url";
++import { CMD_JS_RE, cliFromCmd } from "../scripts/bin/claude-official.js";
++
++const HERE = dirname(fileURLToPath(import.meta.url));
++const WRAPPER = resolve(HERE, "../scripts/bin/claude-official.js");
++const WRAPPER_CMD = resolve(HERE, "../scripts/bin/claude-official.cmd");
++const FAKE_CLI = resolve(HERE, "fakes/claude-cli.js");
++
++const STRIPPED = [
++  "ANTHROPIC_BASE_URL",
++  "ANTHROPIC_AUTH_TOKEN",
++  "ANTHROPIC_MODEL",
++  "ANTHROPIC_SMALL_FAST_MODEL",
++  "ANTHROPIC_DEFAULT_HAIKU_MODEL",
++  "ANTHROPIC_DEFAULT_SONNET_MODEL",
++  "ANTHROPIC_DEFAULT_OPUS_MODEL",
++];
++
++/** 去掉大小写不同的同名键（Windows 上 PATH 可能叫 Path）。 */
++function setEnv(env: Record<string, string | undefined>, key: string, value: string | undefined): void {
++  for (const k of Object.keys(env)) if (k.toUpperCase() === key.toUpperCase()) delete env[k];
++  if (value !== undefined) env[key] = value;
++}
++
++interface FakeOut {
++  argv: string[];
++  CLAUDE_CONFIG_DIR: string | null;
++  CLAUDE_CODE_GIT_BASH_PATH: string | null;
++  ANTHROPIC_API_KEY: string | null;
++  present: Record<string, boolean>;
++}
++
++/** 在临时目录里跑包装脚本；默认用假 cli。 */
++function run(
++  args: string[],
++  extra: Record<string, string | undefined> = {},
++): { code: number | null; stderr: string; out: FakeOut | null; tmp: string } {
++  const tmp = mkdtempSync(join(tmpdir(), "film-claude-"));
++  const outFile = join(tmp, "out.json");
++  const env: Record<string, string | undefined> = { ...process.env };
++  for (const k of [...STRIPPED, "ANTHROPIC_API_KEY", "CLAUDE_CODE_GIT_BASH_PATH", "FILM_GIT_BASH"]) setEnv(env, k, undefined);
++  setEnv(env, "FILM_REAL_CLAUDE", FAKE_CLI);
++  setEnv(env, "FILM_CLAUDE_CONFIG_DIR", join(tmp, "cfg"));
++  setEnv(env, "FAKE_OUT", outFile);
++  for (const [k, v] of Object.entries(extra)) setEnv(env, k, v);
++  const r = spawnSync(process.execPath, [WRAPPER, ...args], { env: env as NodeJS.ProcessEnv, encoding: "utf8" });
++  const out = existsSync(outFile) ? (JSON.parse(readFileSync(outFile, "utf8")) as FakeOut) : null;
++  return { code: r.status, stderr: r.stderr, out, tmp };
++}
++
++test("参数原样传给真正的 claude（换行、&、|、引号、%PATH%、中文）", () => {
++  const args = ["-p", "第一行\n第二行", "a & b", "x | y", 'say "hi"', "%PATH%", "导演：开拍", "", "--flag=1 2"];
++  const r = run(args);
++  try {
++    assert.equal(r.code, 0, r.stderr);
++    assert.deepEqual(r.out?.argv, args);
++  } finally {
++    rmSync(r.tmp, { recursive: true, force: true });
++  }
++});
++
++test("去掉 7 个 ANTHROPIC_* 网关变量，保留 ANTHROPIC_API_KEY", () => {
++  const extra: Record<string, string> = Object.fromEntries(STRIPPED.map((k) => [k, "gateway"]));
++  extra.ANTHROPIC_API_KEY = "test-key";
++  const r = run(["--version"], extra);
++  try {
++    assert.equal(r.code, 0, r.stderr);
++    for (const k of STRIPPED) assert.equal(r.out?.present[k], false, k);
++    assert.equal(r.out?.ANTHROPIC_API_KEY, "test-key");
++  } finally {
++    rmSync(r.tmp, { recursive: true, force: true });
++  }
++});
++
++test("CLAUDE_CONFIG_DIR 等于 FILM_CLAUDE_CONFIG_DIR，且目录已建", () => {
++  const r = run([]);
++  try {
++    const cfg = join(r.tmp, "cfg");
++    assert.equal(r.code, 0, r.stderr);
++    assert.equal(r.out?.CLAUDE_CONFIG_DIR, cfg);
++    assert.ok(statSync(cfg).isDirectory());
++  } finally {
++    rmSync(r.tmp, { recursive: true, force: true });
++  }
++});
++
++test("子进程退出码原样返回", () => {
++  const r = run([], { FAKE_CODE: "7" });
++  try {
++    assert.equal(r.code, 7);
++  } finally {
++    rmSync(r.tmp, { recursive: true, force: true });
++  }
++});
++
++test("没设 CLAUDE_CODE_GIT_BASH_PATH 时用 FILM_GIT_BASH", () => {
++  const r = run([], { FILM_GIT_BASH: "C:\\fake\\Git\\bin\\bash.exe" });
++  try {
++    assert.equal(r.code, 0, r.stderr);
++    assert.equal(r.out?.CLAUDE_CODE_GIT_BASH_PATH, "C:\\fake\\Git\\bin\\bash.exe");
++  } finally {
++    rmSync(r.tmp, { recursive: true, force: true });
++  }
++});
++
++test("已有 CLAUDE_CODE_GIT_BASH_PATH 就保留", () => {
++  const r = run([], { CLAUDE_CODE_GIT_BASH_PATH: "D:\\keep\\bash.exe", FILM_GIT_BASH: "C:\\other\\bash.exe" });
++  try {
++    assert.equal(r.out?.CLAUDE_CODE_GIT_BASH_PATH, "D:\\keep\\bash.exe");
++  } finally {
++    rmSync(r.tmp, { recursive: true, force: true });
++  }
++});
++
++test("找不到 claude → 退出 127，stderr 说明", () => {
++  const empty = mkdtempSync(join(tmpdir(), "film-nopath-"));
++  try {
++    const r = run([], { FILM_REAL_CLAUDE: join(empty, "nope", "cli.js"), PATH: empty });
++    try {
++      assert.equal(r.code, 127);
++      assert.match(r.stderr, /找不到 claude/);
++      assert.equal(r.out, null);
++    } finally {
++      rmSync(r.tmp, { recursive: true, force: true });
++    }
++  } finally {
++    rmSync(empty, { recursive: true, force: true });
++  }
++});
++
++test("从 npm 风格 claude.cmd 解析出 cli.js 绝对路径", () => {
++  const dir = mkdtempSync(join(tmpdir(), "film-cmd-"));
++  try {
++    const cmd = join(dir, "claude.cmd");
++    writeFileSync(
++      cmd,
++      '@ECHO off\r\nSETLOCAL\r\n"%_prog%"  "%dp0%\\node_modules\\@anthropic-ai\\claude-code\\cli.js" %*\r\n',
++      "utf8",
++    );
++    assert.equal(cliFromCmd(cmd), join(dir, "node_modules", "@anthropic-ai", "claude-code", "cli.js"));
++  } finally {
++    rmSync(dir, { recursive: true, force: true });
++  }
++});
++
++test("claude-official.cmd 恰好两行，且能被 autoloop 的正则解析到 claude-official.js", () => {
++  const text = readFileSync(WRAPPER_CMD, "utf8");
++  assert.deepEqual(text.split(/\r?\n/).filter((l) => l !== ""), ["@echo off", 'node "%~dp0\\claude-official.js" %*']);
++  assert.match(text, CMD_JS_RE);
++  assert.equal(cliFromCmd(WRAPPER_CMD), WRAPPER);
++});
++
++test("PATH 里的 claude.cmd 能被找到并运行", () => {
++  const dir = mkdtempSync(join(tmpdir(), "film-pathcmd-"));
++  try {
++    mkdirSync(join(dir, "pkg"));
++    writeFileSync(join(dir, "pkg", "cli.js"), readFileSync(FAKE_CLI, "utf8"), "utf8");
++    writeFileSync(join(dir, "claude.cmd"), '@echo off\r\nnode "%~dp0\\pkg\\cli.js" %*\r\n', "utf8");
++    const r = run(["hello"], { FILM_REAL_CLAUDE: undefined, PATH: dir, FAKE_CODE: "3" });
++    try {
++      assert.equal(r.code, 3, r.stderr);
++      assert.deepEqual(r.out?.argv, ["hello"]);
++    } finally {
++      rmSync(r.tmp, { recursive: true, force: true });
++    }
++  } finally {
++    rmSync(dir, { recursive: true, force: true });
++  }
++});
+diff --git a/tests/fakes/claude-cli.js b/tests/fakes/claude-cli.js
+new file mode 100644
+index 0000000..f2f42c8
+--- /dev/null
++++ b/tests/fakes/claude-cli.js
+@@ -0,0 +1,23 @@
++// 假的 claude 入口：把收到的参数和关心的环境变量写进 FAKE_OUT，然后以 FAKE_CODE 退出。
++import { writeFileSync } from "node:fs";
++
++const WATCHED = [
++  "ANTHROPIC_BASE_URL",
++  "ANTHROPIC_AUTH_TOKEN",
++  "ANTHROPIC_MODEL",
++  "ANTHROPIC_SMALL_FAST_MODEL",
++  "ANTHROPIC_DEFAULT_HAIKU_MODEL",
++  "ANTHROPIC_DEFAULT_SONNET_MODEL",
++  "ANTHROPIC_DEFAULT_OPUS_MODEL",
++];
++
++const out = {
++  argv: process.argv.slice(2),
++  CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR ?? null,
++  CLAUDE_CODE_GIT_BASH_PATH: process.env.CLAUDE_CODE_GIT_BASH_PATH ?? null,
++  ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY ?? null,
++  present: Object.fromEntries(WATCHED.map((k) => [k, process.env[k] !== undefined])),
++};
++
++if (process.env.FAKE_OUT) writeFileSync(process.env.FAKE_OUT, JSON.stringify(out), "utf8");
++process.exit(Number(process.env.FAKE_CODE ?? 0));

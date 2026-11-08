@@ -1,0 +1,180 @@
+# Review package: 4fd5db2..HEAD
+
+## Commits
+4b3005c feat: 审核加判定门槛（只有硬伤才不通过）
+
+## Files changed
+ .claude/agents/film-reviewer.md                    |  5 ++++
+ .../film-director/references/reviews/final.md      |  6 ++++
+ .../references/reviews/keyframe-plan.md            |  5 ++++
+ .../film-director/references/reviews/keyframes.md  |  5 ++++
+ .../film-director/references/reviews/pre-submit.md |  6 ++++
+ .../film-director/references/reviews/story.md      |  5 ++++
+ tests/review-threshold.test.ts                     | 34 ++++++++++++++++++++++
+ 7 files changed, 66 insertions(+)
+
+## Diff
+diff --git a/.claude/agents/film-reviewer.md b/.claude/agents/film-reviewer.md
+index fcc50d1..cb0b7b8 100644
+--- a/.claude/agents/film-reviewer.md
++++ b/.claude/agents/film-reviewer.md
+@@ -5,10 +5,15 @@ tools: Read, Glob, Grep
+ model: inherit
+ ---
+ 
+ 你是第一次看这些材料的审核，只读不改：不新建、不修改、不删除任何文件。
+ 
+ - 只读提示词里列出的文件，别的文件不要打开。
+ - 不要打开 `reviews/` 目录下的任何文件，也不要打开 `state.json`。
+ - 图片用 Read 打开，放大看细节。
+ - 只按提示词里的清单逐条挑错，写清楚哪个文件、哪里不对、为什么。
+ - 最后一行只写"通过"或"不通过"，不加别的字。
++
++判定标准：
++- 只有"硬伤"才判"不通过"。硬伤是：(a) 很可能让 AI 拍错、抽废、白花钱的；(b) 违背本人要求文件里某一条的；(c) 逻辑、时间线、方位（左右、朝向）自相矛盾的。
++- 其他问题（更好的写法、可能的小风险、审美建议）写成"建议"，不影响通过。
++- 每条问题都标上"硬伤"或"建议"。没有硬伤，最后一行写"通过"。
+diff --git a/.claude/skills/film-director/references/reviews/final.md b/.claude/skills/film-director/references/reviews/final.md
+index ce0ab38..5a89842 100644
+--- a/.claude/skills/film-director/references/reviews/final.md
++++ b/.claude/skills/film-director/references/reviews/final.md
+@@ -2,10 +2,16 @@
+ 
+ 这是成片（成片和已解码好的帧见下面的资料列表）。你第一次看，我不告诉你任何结论。
+ 
+ 1. 全部解码，每镜取多张全分辨率帧，切点前后各取 3 帧。（帧已经解码好放在资料列表里，逐张打开看。）
+ 2. 先写你看懂的故事，再列看不懂的地方。
+ 3. 逐镜查：重复的动作、道具数量、穿帮、突跳、颜色跳变、脸变形、字的问题。
+ 4. 明确写出你查不了的东西（动态手感、声音）。
+ 5. 对照本人要求文件，列出被忘掉的要求。
+ 
+ 每条写：时间、帧号、问题。分“硬伤”和“小问题”。
++
++判定标准：
++- 只有"硬伤"才判"不通过"。硬伤是：(a) 很可能让 AI 拍错、抽废、白花钱的；(b) 违背本人要求文件里某一条的；(c) 逻辑、时间线、方位（左右、朝向）自相矛盾的。
++- 其他问题（更好的写法、可能的小风险、审美建议）写成"建议"，不影响通过。
++- 每条问题都标上"硬伤"或"建议"。没有硬伤，最后一行写"通过"。
++- 上面分的"硬伤"就是这里的硬伤，有一条就判"不通过"；"小问题"就是"建议"，不影响通过。
+diff --git a/.claude/skills/film-director/references/reviews/keyframe-plan.md b/.claude/skills/film-director/references/reviews/keyframe-plan.md
+index 1b3d4dd..6ef14e0 100644
+--- a/.claude/skills/film-director/references/reviews/keyframe-plan.md
++++ b/.claude/skills/film-director/references/reviews/keyframe-plan.md
+@@ -7,10 +7,15 @@
+ 
+ 1. 动作要用到的东西，首帧里必须有。比如后面要拿杯子，首帧里就要看得到杯子，否则杯子会凭空冒出来。
+ 2. 别人的反应要提前摆好。一段视频就是一个镜头，没法中途切过去拍别人，所以首帧里要安排好：一个人在前面做事，另一个人在后面，脸朝着镜头。
+ 3. 很多人一起出现时，不能摆同一个姿势，不然模型会让所有人同时动。
+ 4. 给动作留出空间。东西要落到、飘到的地方要提前空出来，人的头顶也要留点空。
+ 5. 风往哪边吹要统一，不能围巾往左飘，床单却往右飘。
+ 6. 缩小到手机大小看一遍，远处的人太小、看不清就要改。
+ 7. 放大看有没有多余的东西，比如多一个水壶，或者多一条奇怪的细线。
+ 8. 把首帧和尾帧叠在一起看有没有错位。不该变的地方两张图必须一样。比如墙的颜色不一样，视频里墙就会慢慢变色；杯子大了一点，视频里杯子就会慢慢变大。
+ 9. 对照本人要求文件，列出被忘掉的要求。
++
++判定标准：
++- 只有"硬伤"才判"不通过"。硬伤是：(a) 很可能让 AI 拍错、抽废、白花钱的；(b) 违背本人要求文件里某一条的；(c) 逻辑、时间线、方位（左右、朝向）自相矛盾的。
++- 其他问题（更好的写法、可能的小风险、审美建议）写成"建议"，不影响通过。
++- 每条问题都标上"硬伤"或"建议"。没有硬伤，最后一行写"通过"。
+diff --git a/.claude/skills/film-director/references/reviews/keyframes.md b/.claude/skills/film-director/references/reviews/keyframes.md
+index e6c6779..55d5618 100644
+--- a/.claude/skills/film-director/references/reviews/keyframes.md
++++ b/.claude/skills/film-director/references/reviews/keyframes.md
+@@ -5,10 +5,15 @@
+ 
+ 1. 动作要用到的东西，首帧里必须有。比如后面要拿杯子，首帧里就要看得到杯子，否则杯子会凭空冒出来。
+ 2. 别人的反应要提前摆好。一段视频就是一个镜头，没法中途切过去拍别人，所以首帧里要安排好：一个人在前面做事，另一个人在后面，脸朝着镜头。
+ 3. 很多人一起出现时，不能摆同一个姿势，不然模型会让所有人同时动。
+ 4. 给动作留出空间。东西要落到、飘到的地方要提前空出来，人的头顶也要留点空。
+ 5. 风往哪边吹要统一，不能围巾往左飘，床单却往右飘。
+ 6. 缩小到手机大小看一遍，远处的人太小、看不清就要改。
+ 7. 放大看有没有多余的东西，比如多一个水壶，或者多一条奇怪的细线。
+ 8. 把首帧和尾帧叠在一起看有没有错位。不该变的地方两张图必须一样。比如墙的颜色不一样，视频里墙就会慢慢变色；杯子大了一点，视频里杯子就会慢慢变大。
+ 9. 对照本人要求文件，列出被忘掉的要求。
++
++判定标准：
++- 只有"硬伤"才判"不通过"。硬伤是：(a) 很可能让 AI 拍错、抽废、白花钱的；(b) 违背本人要求文件里某一条的；(c) 逻辑、时间线、方位（左右、朝向）自相矛盾的。
++- 其他问题（更好的写法、可能的小风险、审美建议）写成"建议"，不影响通过。
++- 每条问题都标上"硬伤"或"建议"。没有硬伤，最后一行写"通过"。
+diff --git a/.claude/skills/film-director/references/reviews/pre-submit.md b/.claude/skills/film-director/references/reviews/pre-submit.md
+index ee5430b..035bde9 100644
+--- a/.claude/skills/film-director/references/reviews/pre-submit.md
++++ b/.claude/skills/film-director/references/reviews/pre-submit.md
+@@ -4,11 +4,17 @@
+ 材料：提示词文件、首帧、尾帧、设定图、分镜表、配色规则（路径见下面的资料列表）。
+ 逐项核对，放大看图：
+ 
+ 1. 提示词的每句话和两张图对得上吗？（位置、左右、颜色、人数、道具数量、衣服、表情）
+ 2. 两张图的机位、大小、背景一致吗？
+ 3. 和设定图、配色规则、前后镜头对得上吗？
+ 4. 动作现实吗？每个动作的原因写了吗？手放在哪？
+ 5. 模型可能在哪里出错？（同时动作、凭空出现、长脸、走反方向、歧义词）
+ 6. 对照本人要求文件，列出被忘掉的要求。
+ 
++判定标准：
++- 只有"硬伤"才判"不通过"。硬伤是：(a) 很可能让 AI 拍错、抽废、白花钱的；(b) 违背本人要求文件里某一条的；(c) 逻辑、时间线、方位（左右、朝向）自相矛盾的。
++- 其他问题（更好的写法、可能的小风险、审美建议）写成"建议"，不影响通过。
++- 每条问题都标上"硬伤"或"建议"。没有硬伤，最后一行写"通过"。
++- 提交前审核额外从严：提示词和首尾帧对不上的任何一处（位置、左右、颜色、人数、道具数量、衣服、表情），以及首尾帧之间机位、大小、背景不一致，都算硬伤。
++
+ 最后只写“通过”或“不通过”。不通过就在前面逐条列出要改什么。
+diff --git a/.claude/skills/film-director/references/reviews/story.md b/.claude/skills/film-director/references/reviews/story.md
+index fe660fe..c7fb14a 100644
+--- a/.claude/skills/film-director/references/reviews/story.md
++++ b/.claude/skills/film-director/references/reviews/story.md
+@@ -3,11 +3,16 @@
+ 这是一支短片的逐镜头故事。你是第一次看，只负责挑错，不改文件。
+ 
+ 1. 只按镜头顺序读，先写出你看懂的故事。
+ 2. 按顺序追问每个转折：为什么会这样？东西从哪来？够得着吗？现实里真会这样吗？
+ 3. 能用一句话说清想表达什么吗？
+ 4. 开头抓人吗？最抓眼球的画面放在前面了吗？
+ 5. 旁人的反应像真人吗？有没有先后？
+ 6. 哪些镜头 AI 视频模型容易拍错？（人物交叉、手拿小东西、文字、镜子和倒影、左右不对称的特征、一个镜头里换光、一个人连做三个动作、俯拍看不到脸、配角太多）
+ 7. 对照本人要求文件，列出被忘掉的要求。
+ 
++判定标准：
++- 只有"硬伤"才判"不通过"。硬伤是：(a) 很可能让 AI 拍错、抽废、白花钱的；(b) 违背本人要求文件里某一条的；(c) 逻辑、时间线、方位（左右、朝向）自相矛盾的。
++- 其他问题（更好的写法、可能的小风险、审美建议）写成"建议"，不影响通过。
++- 每条问题都标上"硬伤"或"建议"。没有硬伤，最后一行写"通过"。
++
+ 每条写：镜头、问题、建议改法。没把握的写“可能”。最后写“通过”或“不通过”。
+diff --git a/tests/review-threshold.test.ts b/tests/review-threshold.test.ts
+new file mode 100644
+index 0000000..e1b282d
+--- /dev/null
++++ b/tests/review-threshold.test.ts
+@@ -0,0 +1,34 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { readFileSync } from "node:fs";
++import { dirname, join, resolve } from "node:path";
++import { fileURLToPath } from "node:url";
++
++const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
++const REVIEWS = join(REPO, ".claude", "skills", "film-director", "references", "reviews");
++const KINDS = ["story", "keyframe-plan", "keyframes", "pre-submit", "final"];
++
++function read(p: string): string {
++  return readFileSync(p, "utf8");
++}
++
++test("五份清单都有判定标准：只有硬伤才不通过，其他写成建议", () => {
++  for (const k of KINDS) {
++    const text = read(join(REVIEWS, `${k}.md`));
++    for (const s of ["判定标准", "硬伤", "建议"]) {
++      assert.ok(text.includes(s), `${k}.md 缺少：${s}`);
++    }
++    assert.ok(text.includes('只有"硬伤"才判"不通过"'), `${k}.md 缺少硬伤门槛`);
++  }
++});
++
++test("提交前审核额外从严", () => {
++  assert.ok(read(join(REVIEWS, "pre-submit.md")).includes("额外从严"), "pre-submit.md 缺少：额外从严");
++});
++
++test("film-reviewer 正文也有判定标准", () => {
++  const body = read(join(REPO, ".claude", "agents", "film-reviewer.md"));
++  for (const s of ["判定标准", "硬伤", "建议"]) {
++    assert.ok(body.includes(s), `film-reviewer.md 缺少：${s}`);
++  }
++});

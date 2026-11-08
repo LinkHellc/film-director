@@ -1,0 +1,3166 @@
+# Review package: e100018..HEAD
+
+## Commits
+4fd5db2 docs: 结果不明由本人核对后才 reconcile；继续做时处理已批准未提交的报价
+626a892 feat: seedance.ts reconcile 核对结果不明的提交；已花金额统一由 spentFromRows 计算
+ad4fa3e fix: 查询出错（含 404、无可识别状态）只在 wait 里连续达上限才判失败；兼容 data.status；按提交时的网关地址查询
+7be139c fix: quote.ts 按模型限制单镜最长秒数，拒绝给不支持首尾帧的模型报价
+14a9b7e fix: 推近镜头的裁切示例改为居中，并说明怎么偏移
+33ce627 docs: G4 说明只回数字不算批准、approve.ts 认哪两种回答
+3027718 chore: .gitattributes 统一 LF（cmd/ps1 保留 CRLF），gates.md 等转回 LF
+2d6a047 fix: approve.ts 只认选项原文或以"批准 Q<n>"开头且不含否定/疑问/拖延字样的回答
+85ee283 fix: 审核改派项目只读 agent film-reviewer（不再用 Explore）
+
+## Files changed
+ .claude/agents/film-reviewer.md                    |  14 +
+ .claude/skills/film-director/SKILL.md              |  14 +-
+ .claude/skills/film-director/references/gates.md   | 438 +++++-----
+ .../film-director/references/stages/2-board.md     |   2 +-
+ .../film-director/references/stages/4-keyframes.md |   4 +-
+ .gitattributes                                     |   4 +
+ README.md                                          |  17 +-
+ config/pricing.json                                |   4 +-
+ .../plans/2026-11-07-ai-film-autoloop.md           | 910 ++++++++++-----------
+ scripts/approve.ts                                 |  15 +-
+ scripts/bin/claude-official.cmd                    |   4 +-
+ scripts/bin/login-official.ps1                     |  40 +-
+ scripts/lib/video-api.ts                           |  84 +-
+ scripts/quote.ts                                   |  54 +-
+ scripts/seedance.ts                                | 147 +++-
+ tests/approve.test.ts                              |  40 +-
+ tests/fakes/video-server.ts                        |  11 +
+ tests/quote.test.ts                                |  59 +-
+ tests/seedance.test.ts                             | 220 ++++-
+ tests/skill.test.ts                                |  66 ++
+ 20 files changed, 1374 insertions(+), 773 deletions(-)
+
+## Diff
+diff --git a/.claude/agents/film-reviewer.md b/.claude/agents/film-reviewer.md
+new file mode 100644
+index 0000000..fcc50d1
+--- /dev/null
++++ b/.claude/agents/film-reviewer.md
+@@ -0,0 +1,14 @@
++---
++name: film-reviewer
++description: 短片流程的只读审核员：只按提示词里给定的清单挑错，不改文件。由 film-director 派审核时使用。
++tools: Read, Glob, Grep
++model: inherit
++---
++
++你是第一次看这些材料的审核，只读不改：不新建、不修改、不删除任何文件。
++
++- 只读提示词里列出的文件，别的文件不要打开。
++- 不要打开 `reviews/` 目录下的任何文件，也不要打开 `state.json`。
++- 图片用 Read 打开，放大看细节。
++- 只按提示词里的清单逐条挑错，写清楚哪个文件、哪里不对、为什么。
++- 最后一行只写"通过"或"不通过"，不加别的字。
+diff --git a/.claude/skills/film-director/SKILL.md b/.claude/skills/film-director/SKILL.md
+index 8b881d6..f9bd329 100644
+--- a/.claude/skills/film-director/SKILL.md
++++ b/.claude/skills/film-director/SKILL.md
+@@ -43,38 +43,40 @@ description: 当本人说"开一支新片""做一支短片""拍个短片：…
+ 
+ ## 继续做
+ 
+ 本人说"继续做《片名》"（或会话中断后重新开始）时：
+ 
+ 1. 读 `films/<片名>/state.json` 和 `films/<片名>/requirements.md`，再看当前阶段已有的产物（`ls` 对应目录）。
+ 2. 打开当前阶段的手册（见文末阶段索引），从还没做完的那一步接着做；已经完成的阶段不重做。
+ 3. 如果有 `films/<片名>/.submit.lock`：不要删它，把文件内容原样告诉本人，等本人处理。
+ 4. 如果 `state.shots` 里有镜头的 `status` 是 `generating`：先按"等出片"在后台运行 `wait`。
+ 5. 如果 `state.gates` 里有关口是 `asked`：上次问了还没答，按 `references/gates.md` 重新问一次。
++6. 如果有 `films/<片名>/approvals/Q<n>.json`、但 `spend.jsonl` 里没有这份报价（`quote` 是 Q<n>）的行：先问本人"Q<n> 之前批准过、还没提交，现在提交吗"。本人同意后直接运行 `node scripts/seedance.ts submit <片名> --quote Q<n>`，不要再运行 `approve.ts`（它会报"已经批准过"）；闸门不过就照原因处理（比如审核后改过文件就重新审核、重新报价）。本人不同意就先不提交，问本人想怎么办。
++7. 如果 `spend.jsonl` 里有 `uncertain: true`、还没有对应核对行（同报价同镜头、带 `reconcile`）的行：这一镜提交结果不明，按"出错处理"里"提交结果不明"那一条处理，不要重新提交。
+ 
+ ## 每一步怎么做
+ 
+ - 只做当前阶段还没做完的部分，不跳阶段，不提前画图。
+ - 到了关口，按 `references/gates.md` 用 AskUserQuestion 问本人，问题和选项照写；问之前把 `state.gates.<关口>` 改成 `"asked"`，问完就停下等回答。AskUserQuestion 用不了时，在对话里用同样的问题和编号选项问，然后停下。
+ - 本人的每次回答（包括自由文字、在"其他"里写的话、平时聊天里提的要求）都追加进 `requirements.md`，一行一条，注明时间和关口编号，原话照抄：
+   `- 2026-11-07 14:03 [G1] 选了"故事定了"；补充："结尾再安静一点"`
+   时间用 `date "+%Y-%m-%d %H:%M"` 取。不是关口时的要求写 `[对话]`。然后更新 `state.gates`：本人同意的写 `"approved"`，不同意或要改的写 `"rejected"`（改完再问时重新写 `"asked"`）。
+ - `state.json` 是唯一可以原地改的文件，改之前先重新读一遍（脚本也会改它），改完保持合法 JSON。你只改 `stage`、`settings`、`gates`、`shots` 里的 `seconds`/`status`；`spentCNY` 和 `shots.*.clip` 由脚本写，不要手改。
+ - 其他产物一律新建：同名产物用 `-v<n>`，n 取现有最大编号 + 1。用 Write 写文件之前先 `ls` 确认这个文件还不存在。
+ - 每画完一张图、每出一段视频，都要自己打开看（图用 Read 打开，视频先用 `frames.py extract` 抽帧再看），放大看细节。
+ 
+ ## 审核怎么做
+ 
+ 审核只给清单和资料文件，不给对话和你的结论。每次审核都是一个全新的子 agent。
+ 
+ 1. 运行 `node scripts/review.ts prepare <类型> <片名> [--shot S01]`。类型是 `story`、`keyframe-plan`、`keyframes`、`pre-submit`、`final`；中间三种要带 `--shot`，另外两种不带。退出 0 时它打印 `reviews/<类型>[-<镜头>]-v<n>.prompt.md` 的绝对路径。
+-2. 用 Bash 的 `cat` 读出这个 `.prompt.md` 的全文（不要用 Read，Read 会带行号）。用 Agent 工具开一个新的子 agent：`subagent_type: "Explore"`，`description` 写"审核 <类型> <镜头>"，`prompt` 就是这个文件的全文，原样粘贴，一个字都不加：不附对话内容、不附你的看法、不写文件路径让它自己去读（`reviews/` 下有旧的审核结论，不能让它看到）。
++2. 用 Bash 的 `cat` 读出这个 `.prompt.md` 的全文（不要用 Read，Read 会带行号）。用 Agent 工具开一个新的子 agent：`subagent_type: "film-reviewer"`（项目里的只读审核员 `.claude/agents/film-reviewer.md`，只有 Read、Glob、Grep，模型跟当前会话一样），`description` 写"审核 <类型> <镜头>"，`prompt` 就是这个文件的全文，原样粘贴，一个字都不加：不附对话内容、不附你的看法、不写文件路径让它自己去读（`reviews/` 下有旧的审核结论，不能让它看到）。
+ 3. 把子 agent 的最后回复原文（不删不改）用 Write 存成同一目录下的 `reviews/<类型>[-<镜头>]-v<n>.reply.md`（n 和 prompt.md 的一样）。
+ 4. 运行 `node scripts/review.ts record <片名> --prompt <prompt.md 绝对路径> --reply <reply.md 路径>`。
+    - 退出 0：通过。
+    - 退出 1：不通过。按回复逐条改，改出的文件存新版本，再从第 1 步审一轮。
+    - 退出 3：审核期间资料变了，这一轮作废，从第 1 步重来。
+    - 退出 2：看输出，多半是路径写错了或这一轮已经记过。
+ 5. 同一项审核（同一类型、同一镜头）连续 3 次"不通过"：停下，把三次的主要问题告诉本人，问怎么改（`references/gates.md` 的"审核卡住"一节）。
+ 
+ ## 等出片
+ 
+@@ -83,59 +85,61 @@ description: 当本人说"开一支新片""做一支短片""拍个短片：…
+ ## 命令速查
+ 
+ 所有命令都从项目根目录运行。Python 一律用 `.venv/Scripts/python`；ffmpeg 由脚本自己找（PATH 或 winget 安装位置，环境变量 `FFMPEG`/`FFPROBE` 可以指定）。
+ 
+ | 命令 | 退出码 |
+ |---|---|
+ | `node scripts/new-film.ts <片名> "<想法>" --no-emit` | 0 已开新片；1 片子已存在（什么都没动）；2 用法不对或片名不合法 |
+ | `node scripts/review.ts prepare <类型> <片名> [--shot S01]` | 0 打印 prompt.md 绝对路径；2 用法不对、该带或不该带 `--shot`；3 缺资料（输出列出缺的文件模式） |
+ | `node scripts/review.ts record <片名> --prompt <prompt.md> --reply <reply.md>` | 0 通过；1 不通过；2 用法不对、文件读不到或这一轮已记录过；3 审核期间资料被改过 |
+ | `node scripts/codex-image.ts <片名> --kind style\|sheet\|first\|last --out <基名> --prompt <提示词文件> [--ref <图>]...` | 0 已出图（输出里有"比例不是 16:9"就要裁）；1 阶段闸门不放行（G1/G3/G3b 没批准）；2 参数不对、找不到片子/提示词/参考图；3 Codex 没出图（看最后几行原因）；5 Codex 额度用完 |
+-| `node scripts/quote.ts <片名> --shots S01,S02 [--model mini\|2.5]` | 0 报价成功，打印一句话（报价号、秒数、金额、已花、余额）；2 出错（镜头没过提交前审核、没设预算等）或超预算（输出以"超预算："开头，报价文件写了但不能批准） |
++| `node scripts/quote.ts <片名> --shots S01,S02 [--model mini\|2.5]` | 0 报价成功，打印一句话（报价号、秒数、金额、已花、余额）；2 出错（镜头没过提交前审核、没设预算、单镜计费秒数超过模型上限要拆镜头、模型不支持首尾帧等）或超预算（输出以"超预算："开头，报价文件写了但不能批准） |
+ | `node scripts/approve.ts <片名> Q<n> --said '<本人回答原文>'` | 0 已记下批准；1 报价不存在/超预算/原文里没有"批准 Q<n>"/已经批准过；2 用法不对 |
+ | `node scripts/seedance.ts submit <片名> --quote Q<n>` | 0 全部提交；1 被闸门拒绝（逐条列原因）、没设 Key、另一个提交的锁还在、网关拒绝、或结果不明（可能已扣费，不要重发）；2 用法不对；4 欠费，其余镜头没提交；7 网关已建任务但没记上账，锁保留 |
+ | `node scripts/seedance.ts wait <片名> [--interval 30] [--timeout 3600]` | 0 全部结束并已下载（个别镜头"生成失败"也是 0，看输出）；1 有片段下载出错或没设 Key；2 用法不对；6 超时，已出好的已下载，再 `wait` 一次 |
+ | `node scripts/seedance.ts poll <片名> [--json]` | 0 都结束了或没有待查任务；10 还有没结束的；1 没设 Key；2 用法不对（只在本人要看进度时用一次） |
+ | `node scripts/seedance.ts fetch <片名>` | 0 下载完成；1 有下载出错或没设 Key；2 用法不对（`wait` 已经包含下载，一般不用） |
++| `node scripts/seedance.ts reconcile <片名> --quote Q<n> --shot S01 (--task <任务号> \| --not-created) --note '<本人说明原文>'` | 0 已记下核对（`--task`：之后 `wait` 会下载这个任务；`--not-created`：已花金额不再算这一镜）；1 这一镜在这份报价里没有结果不明的行、已经核对过、任务号已记过或锁还在；2 用法不对。不联网、不花钱 |
+ | `.venv/Scripts/python scripts/py/sketch.py <分镜JSON> <输出png>` | 0 已画总表；2 JSON 不对或输出已存在 |
+ | `.venv/Scripts/python scripts/py/grayscale.py <输入png> <输出png> [--board <分镜JSON>] [--min-contrast 0.25]` | 0 明暗对比都够；1 有色块对比不够（逐条列出）；2 参数不对或输出已存在 |
+ | `.venv/Scripts/python scripts/py/frames.py extract <视频> <输出目录> [--every 0.5 \| --around 2.0,5.0 [--n 3]]` | 0 已抽帧；1 ffmpeg 出错；2 参数不对或有重名帧（一张都没写） |
+ | `.venv/Scripts/python scripts/py/frames.py crop169 <输入png> <输出png>` | 0 已居中裁成 16:9；2 输入不对或输出已存在 |
+ | `.venv/Scripts/python scripts/py/frames.py compare <首帧> <尾帧> <输出png>` | 0 已画叠加图和差值图，打印差异最大的 5 格；2 输入不对或输出已存在 |
+ | `.venv/Scripts/python scripts/py/post.py concat <清单txt> <输出mp4>` | 0 已拼接（每段按 BT.601 解码、lanczos 放大到 1080p、轻微锐化、交付标 BT.709）；1 ffmpeg 出错；2 参数不对或输出已存在 |
+ | `.venv/Scripts/python scripts/py/post.py grade <输入> <输出> [--sat 1.0] [--bright 0.0]` | 0 已调彩度亮度；1 ffmpeg 出错；2 参数不对或输出已存在（只用于拼接之后的成片） |
+ | `.venv/Scripts/python scripts/py/post.py trim <输入> <输出> --start 秒 --end 秒` | 0 已剪；1 ffmpeg 出错；2 参数不对或输出已存在（只用于拼接之后的成片） |
+ 
+ Python 工具的退出码约定：0 成功；1 检查没通过或 ffmpeg 出错；2 参数或输入有问题、输出已存在（原文件不动）。
+ 
+ ## 出错处理
+ 
+ | 情况 | 怎么做 |
+ |---|---|
+ | `codex-image.ts` 退出 5（额度用完） | 告诉本人 Codex 额度用完了，停止画图（别的图也不画），等本人说继续再画。不买额度。 |
+ | `codex-image.ts` 退出 3（没出图） | 看输出最后几行。有 HTTP 400"requires a newer version of Codex"→ Codex CLI 太旧，把 `codex --version` 的结果告诉本人，请本人运行 `npm install -g @openai/codex@latest` 升级，你不自己装；其他原因 → 重画一次，还不行就告诉本人。 |
+ | 出的图比例不对 | 用 `frames.py crop169` 裁切存新版本，不重画。 |
+ | 同一项审核连续 3 次"不通过" | 停下，问本人怎么改（`references/gates.md` 的"审核卡住"）。 |
+ | Seedance 任务失败（`wait` 输出"<镜头> 生成失败：<原因>"） | 读原因。参数问题（规格、时长、图片格式、内容审核）→ 改完提示词或首尾帧，重新审核、重新报价。临时错误（超时、网关出错）→ 先请本人到网关任务日志或账单确认那次失败没扣费；确认没扣，才同样内容重新报价重拍一次（G4 里写明是重试）；扣了或确认不了 → 当成新的一次重新报价，先问本人。 |
+-| `submit` 退出 1 且输出"提交结果不明" | 可能已经扣费、已经按可能扣费记账。不要重发，把输出原样告诉本人，请本人到网关任务日志核对。 |
++| `submit` 退出 1 且输出"提交结果不明" | 可能已经扣费、已经按可能扣费记账。不要重发，把输出原样告诉本人，请本人到网关后台的任务日志核对这一镜建没建成任务。本人查清后由本人决定是否核对：只有本人在这一轮明确给出任务号或说"没建成"之后，你才运行 `node scripts/seedance.ts reconcile <片名> --quote Q<n> --shot <镜头> --task <本人给的任务号> --note '<本人原话>'`（建成了，之后 `wait` 下载）或 `... --not-created --note '<本人原话>'`（没建成，已花金额扣回这一镜）。不要自己猜任务号，不要替本人下结论。这份报价不能再提交（闸门 7）；没建成的镜头要拍就重新报价、问 G4。 |
+ | `submit` 退出 1 且输出"另一个提交正在进行" | 不要删锁文件。把输出原样告诉本人，等本人处理。 |
+ | `submit` 退出 4（欠费） | 停止提交，用已有片段粗剪一版给本人看（`references/stages/6-generate.md`），告诉本人欠费了，停下。不充值，不重试。 |
+ | `submit` 退出 7（建了任务没记上账） | 立刻停下，把命令打印的全部内容原样告诉本人（任务号、金额、应补记的那一行）。不要自己补记 `spend.jsonl`，不要删 `.submit.lock`，不要重新提交。 |
++| `poll`/`fetch`/`wait` 输出"当前网关地址不同，跳过" | 那些任务是在别的网关地址提交的。不要自己改地址，把输出原样告诉本人，等本人把 `SEEDANCE_BASE_URL` 改回提交时的地址再 `wait`。 |
+ | `wait` 退出 6（超时） | 已出好的已下载；再在后台运行一次 `wait`。 |
+ | 视频有问题 | 先剪掉 → 再用代码修 → 都不行才改提示词或首尾帧后重拍，只拍这一镜；旧片段保留（`references/stages/6-generate.md`）。 |
+ | 缺工具或缺 Key | 告诉本人缺什么、怎么装或怎么设，不自动安装（`references/stages/0-setup.md`）。 |
+ 
+ ## 硬性禁止
+ 
+ - 不手动调用视频接口（不用 curl、fetch 或自己写代码请求网关），只能经过 `scripts/seedance.ts`。
+-- 不手写或改动 `spend.jsonl`、`fetched.jsonl`、`approvals/`、`quotes/`、`reviews/*.json`、`.submit.lock`；这些只由脚本写。
+-- `approve.ts` 只在本人这一轮的回答里明确选了"批准 Q<n>"（或亲口写了"批准 Q<n>"）之后才运行，`--said` 填本人回答的原文，不改写、不补字。回答含糊（"可以""行吧"）就再问一次 G4，不运行。旧的回答不能拿来批准新的报价。
++- 不手写或改动 `spend.jsonl`、`fetched.jsonl`、`approvals/`、`quotes/`、`reviews/*.json`、`.submit.lock`；这些只由脚本写（结果不明的核对也只能经 `seedance.ts reconcile`，并且要本人这一轮明确说了结果）。
++- `approve.ts` 只在本人这一轮的回答里明确选了"批准 Q<n>"（或亲口写了"批准 Q<n>"）之后才运行，`--said` 填本人回答的原文，不改写、不补字。回答含糊（"可以""行吧"）就再问一次 G4，不运行。旧的回答不能拿来批准新的报价。用编号选项在对话里问 G4 时，请本人原样打出 `批准 Q<n>`；只回一个数字不算批准。`approve.ts` 只认选项原文，或以 `批准 Q<n>` 开头、不含否定、疑问、拖延字样的回答（详见 `references/gates.md` 的 G4）。
+ - 不覆盖、不删除文件（`state.json` 原地更新、`requirements.md` 追加除外）。
+ - 不打印 `SEEDANCE_API_KEY`，不把它写进任何文件或命令行；只检查它有没有设。
+ - 不充值、不买额度（Codex 和网关都是）。
+ - 没看过动态、没听过声音的东西要明说。你只能看抽出来的帧，看不到真正的动态，也听不到声音。
+ - 不改脚本、配置和本 Skill 来绕过闸门；闸门拦下来就照它说的原因改产物。
+ 
+ ## 阶段索引
+ 
+ | `state.stage` | 手册 | 关口 |
+ |---|---|---|
+diff --git a/.claude/skills/film-director/references/gates.md b/.claude/skills/film-director/references/gates.md
+index 07e35b4..a953d82 100644
+--- a/.claude/skills/film-director/references/gates.md
++++ b/.claude/skills/film-director/references/gates.md
+@@ -1,218 +1,220 @@
+-# 关口
+-
+-每个关口都用 AskUserQuestion 问本人，问题和选项照下面写（`<…>` 换成实际内容）。AskUserQuestion 会自动带一个"其他"让本人写自由文字，不用自己加。问之前把 `state.gates.<关口>` 改成 `"asked"`；问完就停下等回答。
+-
+-本人回答后，统一做三件事：
+-
+-1. 把回答原文追加进 `films/<片名>/requirements.md`：`- <时间> [<关口>] 选了"<选项>"；补充："<自由文字>"`。
+-2. 改 `state.gates.<关口>`：同意写 `"approved"`，要改或不同意写 `"rejected"`。
+-3. 按下面"选完之后"做。
+-
+-本人在"其他"里写了自由文字：先照字面理解；拿不准是同意还是要改，就按"要改"处理，再问一次。
+-
+-附带文件一律写成可以点开的完整路径（`E:/05_AI/04_Claude短片流/films/<片名>/...`），写在问题前面的说明文字里。
+-
+----
+-
+-## G0：开工设置
+-
+-**什么时候问**：`0-setup.md` 的环境检查做完以后。检查结果（缺什么、怎么装）写在问题前面的说明里。
+-
+-**附带文件**：`films/<片名>/brief.md`
+-
+-**问题和选项**（一次问 4 个问题）：
+-
+-1. 问题：`片子多长？` 选项：`15 秒`、`30 秒`、`60 秒`
+-2. 问题：`画幅用哪种？` 选项：`16:9 横屏（现有工具都按这个做）`、`9:16 竖屏（草图、裁切、放大都要另写代码）`
+-3. 问题：`总预算多少？（只算视频生成，金额是估算，以账单为准）` 选项：`¥10`、`¥30`、`¥60`
+-4. 问题：`要配乐和字幕吗？` 选项：`都不要`、`只要字幕`、`要配乐（之后告诉我歌名、时长、BPM）`、`配乐和字幕都要（之后告诉我歌名、时长、BPM）`
+-
+-**选完之后**：
+-
+-- 写进 `state.settings`：`seconds`（数字）、`aspect`（`"16:9"` 或 `"9:16"`）、`budgetCNY`（数字）、`subtitles`（true/false）、`music`（不配乐为 null）。
+-- 选了配乐：再在对话里问歌名、时长、BPM，以及有没有参考片；回答写进 `requirements.md`，`settings.music` 写成 `"<歌名>，<时长> 秒，<BPM> BPM"`。
+-- 选了 9:16：告诉本人 `sketch.py`、`frames.py crop169`、`post.py concat` 都是按 16:9 写的，这几步要现写代码代替，再确认一次。
+-- 全部有了 → `gates.G0 = "approved"`，`stage = "story"`，打开 `stages/1-story.md`。
+-
+----
+-
+-## G1：定故事
+-
+-**什么时候问**：逐镜故事写好、`story` 审核"通过"以后。
+-
+-**附带文件**：`films/<片名>/story/shots-v<n>.md`（审过的那一版）、`films/<片名>/reviews/story-v<n>.md`（审核回复）
+-
+-**问题**：`逐镜故事审核通过了（一句话主题：<主题句>）。故事就这样定吗？`
+-
+-**选项**：`故事定了`、`还要改（在其他里写改哪里）`
+-
+-**选完之后**：
+-
+-- `故事定了` → `gates.G1 = "approved"`，`stage = "board"`，打开 `stages/2-board.md`。从这时起才能画图。
+-- `还要改` 或自由文字 → `gates.G1 = "rejected"`，按本人说的改，存新版本 `story/shots-v<n+1>.md`，重新审 `story`，通过后再问 G1。
+-
+----
+-
+-## G2：定分镜和配色
+-
+-**什么时候问**：分镜表、配色和色表、色块草图总表、黑白检查都做完以后。
+-
+-**附带文件**：`films/<片名>/board/storyboard-v<n>.md`、`films/<片名>/board/palette-v<n>.md`、`films/<片名>/board/sketch-v<n>.png`、`films/<片名>/board/sketch-v<n>-gray.png`
+-
+-**问题**：`分镜 <镜头数> 镜、共 <片中总秒数> 秒、生成计费共 <计费总秒数> 秒（按 mini 估约 ¥<金额>）。分镜和配色这样定吗？`
+-
+-**选项**：`分镜和配色定了`、`分镜要改（在其他里写）`、`配色要改（在其他里写）`
+-
+-**选完之后**：
+-
+-- `分镜和配色定了` → `gates.G2 = "approved"`，确认 `state.shots` 已按分镜写好，`stage = "style"`，打开 `stages/3-style.md`。
+-- 要改 → `gates.G2 = "rejected"`，改出新版本（分镜、配色、草图都存新文件），重做黑白检查，再问 G2。
+-
+----
+-
+-## G3：定画风
+-
+-**什么时候问**：2–3 张样帧画好、你自己看过以后。
+-
+-**附带文件**：`films/<片名>/style/look-v<n>.png`（每张都列出来，标上第几张），以及每张用的提示词文件。
+-
+-**问题**：`这是 <张数> 张样帧，每张一种画风：<每张一句话描述>。用哪一张的画风？`
+-
+-**选项**：`用第 1 张`、`用第 2 张`、`用第 3 张`（只有 2 张就去掉第三项）、`都不行，重画（在其他里写想要的方向）`
+-
+-**选完之后**：
+-
+-- 选了某一张 → 把那张的画风写成一句话，追加进 `requirements.md`（`[G3] 画风：……`，后面所有提示词的【画风】段都用这句），`gates.G3 = "approved"`，接着画设定图（`stages/3-style.md` 第二部分）。
+-- 都不行 → `gates.G3 = "rejected"`，按本人说的方向重写提示词，再画 2–3 张新版本，再问 G3。
+-
+----
+-
+-## G3b：定设定图
+-
+-**什么时候问**：每个角色和固定道具的设定图都画好、你自己逐张看过以后。
+-
+-**附带文件**：`films/<片名>/style/sheet-<角色>-v<n>.png`（每个角色、道具各一张最新版），每张写明固定特征和位置（比如"纹身在左手臂"）。
+-
+-**问题**：`设定图画好了：<每张一句话：谁、固定特征在哪>。这样定吗？`
+-
+-**选项**：`设定图定了`、`要改（在其他里写哪张、哪里）`
+-
+-**选完之后**：
+-
+-- `设定图定了` → `gates.G3b = "approved"`，`stage = "keyframes"`，打开 `stages/4-keyframes.md`。
+-- 要改 → `gates.G3b = "rejected"`，只重画要改的那张（新版本），再问 G3b。
+-
+----
+-
+-## G4：报价（每批一次）
+-
+-**什么时候问**：这一批每个镜头的 `pre-submit` 审核都"通过"、`quote.ts` 退出 0 以后。每份报价问一次，一份报价只对应一次提交。
+-
+-**附带文件**：`films/<片名>/quotes/Q<n>.json`，以及这批每个镜头的 `shots/<镜头>/prompt-v<n>.txt`、`first-v<n>.png`、`last-v<n>.png`、`reviews/pre-submit-<镜头>-v<n>.md`。
+-
+-**问题前面的说明**（照 `quote.ts` 的输出和 `quotes/Q<n>.json` 写）：
+-
+-```
+-报价 Q<n>
+-镜头：S01（4.6 秒 → 计费 6 秒）、S02（……）
+-模型：<mini 或 2.5>（<模型 id>，¥<单价>/秒，720p）
+-合计：约 ¥<合计>　已花：¥<已花>　预算余额：¥<余额>
+-金额是估算，以账单为准。网关提交时按每镜上限预扣（mini 每镜 15 秒），出片后按实际结算退差额，账户余额要够预扣。
+-<是重拍或重试的话，写明是哪一镜、为什么、改了什么>
+-```
+-
+-**问题**：`报价 Q<n>：<镜头数> 镜 <计费秒数> 秒，约 ¥<合计>。提交吗？`
+-
+-**选项**（固定写法，`<n>` 和金额照报价填）：
+-
+-- `批准 Q<n>（¥合计）`，例如 `批准 Q3（¥1.8）`
+-- `改用 2.5 重新报价`——只有当本次报价用的是 mini、并且 `config/pricing.json` 里 `models["2.5"].firstLastFrame` 是 `true`（2.5 支持首尾帧）时才出现。现在的配置里它是 `false`，所以这一项不出现，只问 `批准 Q<n>（¥合计）` 和 `先不拍` 两项。检查命令：
+-  `node -e "const p=JSON.parse(require('fs').readFileSync('config/pricing.json','utf8'));console.log(p.models['2.5'].firstLastFrame===true?'支持':'不支持')"`
+-- `先不拍`
+-
+-**选完之后**：
+-
+-- `批准 Q<n>（¥合计）`（或本人在自由文字里明确写了"批准 Q<n>"）→ 在这一轮里运行
+-  `node scripts/approve.ts <片名> Q<n> --said '<本人回答原文>'`
+-  （原文用单引号包住；原文里有单引号就写成 `'\''`）。退出 0 → `gates.G4 = "approved"` → 运行 `node scripts/seedance.ts submit <片名> --quote Q<n>`，按 `stages/5-prompts.md` 处理结果。退出 1 → 把原因告诉本人，不提交。
+-- `改用 2.5 重新报价` → 运行 `node scripts/quote.ts <片名> --shots <同样的镜头> --model 2.5`，用新报价号重新问 G4。旧报价留着，不批准它。
+-- `先不拍` → `gates.G4 = "rejected"`，不运行 `approve.ts`，问本人想先改什么，等本人说。
+-- 回答含糊（"可以""行""先这样"）→ 不算批准，原样再问一次 G4。
+-
+-**超预算时**（`quote.ts` 退出 2，输出以"超预算："开头）：不问 G4，改问：
+-
+-- 问题：`这批要 ¥<合计>，加上已花 ¥<已花> 超过总预算 ¥<预算>。怎么办？`
+-- 选项：`少拍几镜（在其他里写拍哪几镜）`、`先不拍`
+-- 本人在自由文字里提高预算 → 改 `settings.budgetCNY`、记进 `requirements.md`，再运行 `quote.ts` 出新报价、问 G4。
+-
+----
+-
+-## G5：看动态、听声音
+-
+-**什么时候问**：每一批片段下载完、你逐镜抽帧看过、能剪的剪掉、能用代码修的修好以后。每批都问，**试拍的那 1–2 镜也要问**：试拍行不行得通由本人在这里定，本人选"都可以"之前，不给其余镜头报价、不提交（`stages/6-generate.md` 第 4、5 步）。
+-
+-**附带文件**：每个镜头最新的 `films/<片名>/shots/<镜头>/clip-v<n>.mp4`（修过的话附修好的版本），以及你抽帧看到的问题清单。
+-
+-**问题前面的说明**必须写明：
+-
+-```
+-我没看过动态、没听过声音。我只看了抽出来的帧：<每镜一句看到了什么、发现了什么、怎么处理的>。
+-动作顺不顺、有没有抖、声音能不能用，要你看过、听过才算数。
+-```
+-
+-**问题**：`请看一遍这批片段、听一下声音。这批可以用吗？`
+-
+-**选项**：`都可以`、`有镜头要处理（在其他里写哪一镜、哪里不对）`、`声音不用，后期另配`
+-
+-**选完之后**：
+-
+-- `都可以` → 这批镜头的 `status` 改成 `"accepted"`。还有没拍的镜头（比如刚看完的是试拍那批）→ 这时才照 `stages/5-prompts.md` 第 4–6 步给下一批报价、问 G4。全部镜头都 accepted → `gates.G5 = "approved"`，`stage = "post"`，打开 `stages/7-post.md`。
+-- `有镜头要处理` → `gates.G5 = "rejected"`，按 `stages/6-generate.md` 的"有问题怎么办"处理那一镜（先剪、再代码修、最后才重拍，重拍要重新审核、重新报价、问 G4），处理完再问 G5。
+-- `声音不用，后期另配` → 记进 `requirements.md`；后期不用片段自带的声音，其余同"都可以"。
+-
+----
+-
+-## G6：成片验收
+-
+-**什么时候问**：`out/final-v<n>.mp4` 做好、切点前后 3 帧抽查过、`final` 审核做完以后。
+-
+-**附带文件**：`films/<片名>/out/final-v<n>.mp4`、`films/<片名>/reviews/final-v<n>.md`（审核回复，写明有哪些"硬伤"和"小问题"）
+-
+-**问题前面的说明**写明：我没看过动态、没听过声音；审核也只看了帧，查不了动态手感和声音。
+-
+-**问题**：`成片做好了（<时长> 秒，1920×1080）。验收吗？`
+-
+-**选项**：`验收`、`还要改（在其他里写时间和问题）`
+-
+-**选完之后**：
+-
+-- `验收` → `gates.G6 = "approved"`，`stage = "wrap"`，打开 `stages/8-wrap.md`。
+-- `还要改` → `gates.G6 = "rejected"`，能在后期改的出新版本 `out/final-v<n+1>.mp4` 重新审 `final`；要重拍的回 `stages/6-generate.md`。改完再问 G6。
+-
+----
+-
+-## 改图：首尾帧要改时（不编号）
+-
+-**什么时候问**：`keyframes` 审核或你自己按 8 项检查，发现某个镜头的首帧或尾帧要改的时候（方法论："有问题就告诉我是哪张图、哪里不对，我同意了再改"）。`requirements.md` 里关口编号写 `[改图-<镜头>]`。
+-
+-**附带文件**：要改的图、`reviews/keyframes-<镜头>-v<n>.md`、`frames.py compare` 的对比图。
+-
+-**问题**：`<镜头> 的 <首帧/尾帧> 有这些问题：<逐条：哪张图、哪里不对、打算怎么改>。照这样改吗？`
+-
+-**选项**：`照这样改`、`我来说怎么改（在其他里写）`
+-
+-**选完之后**：按本人的意思改（只改一小块时把改好的那一块贴回原图），存新版本，重新自检、重新审 `keyframes`。
+-
+----
+-
+-## 审核卡住：同一项连续 3 次不通过（不编号）
+-
+-`requirements.md` 里关口编号写 `[审核卡住-<类型>-<镜头>]`。
+-
+-**附带文件**：三次的 `reviews/<类型>[-<镜头>]-v<n>.md`。
+-
+-**问题**：`<类型> <镜头> 的审核连续 3 次没通过，主要卡在：<逐条>。怎么改？`
+-
+-**选项**：`按审核说的改`、`换个拍法（在其他里写）`、`这一镜先不做`
+-
+-**选完之后**：照本人的意思改，再审；`这一镜先不做` → 这一镜 `status` 写 `"skipped"`，告诉本人片长会变短。
++# 关口
++
++每个关口都用 AskUserQuestion 问本人，问题和选项照下面写（`<…>` 换成实际内容）。AskUserQuestion 会自动带一个"其他"让本人写自由文字，不用自己加。问之前把 `state.gates.<关口>` 改成 `"asked"`；问完就停下等回答。
++
++本人回答后，统一做三件事：
++
++1. 把回答原文追加进 `films/<片名>/requirements.md`：`- <时间> [<关口>] 选了"<选项>"；补充："<自由文字>"`。
++2. 改 `state.gates.<关口>`：同意写 `"approved"`，要改或不同意写 `"rejected"`。
++3. 按下面"选完之后"做。
++
++本人在"其他"里写了自由文字：先照字面理解；拿不准是同意还是要改，就按"要改"处理，再问一次。
++
++附带文件一律写成可以点开的完整路径（`E:/05_AI/04_Claude短片流/films/<片名>/...`），写在问题前面的说明文字里。
++
++---
++
++## G0：开工设置
++
++**什么时候问**：`0-setup.md` 的环境检查做完以后。检查结果（缺什么、怎么装）写在问题前面的说明里。
++
++**附带文件**：`films/<片名>/brief.md`
++
++**问题和选项**（一次问 4 个问题）：
++
++1. 问题：`片子多长？` 选项：`15 秒`、`30 秒`、`60 秒`
++2. 问题：`画幅用哪种？` 选项：`16:9 横屏（现有工具都按这个做）`、`9:16 竖屏（草图、裁切、放大都要另写代码）`
++3. 问题：`总预算多少？（只算视频生成，金额是估算，以账单为准）` 选项：`¥10`、`¥30`、`¥60`
++4. 问题：`要配乐和字幕吗？` 选项：`都不要`、`只要字幕`、`要配乐（之后告诉我歌名、时长、BPM）`、`配乐和字幕都要（之后告诉我歌名、时长、BPM）`
++
++**选完之后**：
++
++- 写进 `state.settings`：`seconds`（数字）、`aspect`（`"16:9"` 或 `"9:16"`）、`budgetCNY`（数字）、`subtitles`（true/false）、`music`（不配乐为 null）。
++- 选了配乐：再在对话里问歌名、时长、BPM，以及有没有参考片；回答写进 `requirements.md`，`settings.music` 写成 `"<歌名>，<时长> 秒，<BPM> BPM"`。
++- 选了 9:16：告诉本人 `sketch.py`、`frames.py crop169`、`post.py concat` 都是按 16:9 写的，这几步要现写代码代替，再确认一次。
++- 全部有了 → `gates.G0 = "approved"`，`stage = "story"`，打开 `stages/1-story.md`。
++
++---
++
++## G1：定故事
++
++**什么时候问**：逐镜故事写好、`story` 审核"通过"以后。
++
++**附带文件**：`films/<片名>/story/shots-v<n>.md`（审过的那一版）、`films/<片名>/reviews/story-v<n>.md`（审核回复）
++
++**问题**：`逐镜故事审核通过了（一句话主题：<主题句>）。故事就这样定吗？`
++
++**选项**：`故事定了`、`还要改（在其他里写改哪里）`
++
++**选完之后**：
++
++- `故事定了` → `gates.G1 = "approved"`，`stage = "board"`，打开 `stages/2-board.md`。从这时起才能画图。
++- `还要改` 或自由文字 → `gates.G1 = "rejected"`，按本人说的改，存新版本 `story/shots-v<n+1>.md`，重新审 `story`，通过后再问 G1。
++
++---
++
++## G2：定分镜和配色
++
++**什么时候问**：分镜表、配色和色表、色块草图总表、黑白检查都做完以后。
++
++**附带文件**：`films/<片名>/board/storyboard-v<n>.md`、`films/<片名>/board/palette-v<n>.md`、`films/<片名>/board/sketch-v<n>.png`、`films/<片名>/board/sketch-v<n>-gray.png`
++
++**问题**：`分镜 <镜头数> 镜、共 <片中总秒数> 秒、生成计费共 <计费总秒数> 秒（按 mini 估约 ¥<金额>）。分镜和配色这样定吗？`
++
++**选项**：`分镜和配色定了`、`分镜要改（在其他里写）`、`配色要改（在其他里写）`
++
++**选完之后**：
++
++- `分镜和配色定了` → `gates.G2 = "approved"`，确认 `state.shots` 已按分镜写好，`stage = "style"`，打开 `stages/3-style.md`。
++- 要改 → `gates.G2 = "rejected"`，改出新版本（分镜、配色、草图都存新文件），重做黑白检查，再问 G2。
++
++---
++
++## G3：定画风
++
++**什么时候问**：2–3 张样帧画好、你自己看过以后。
++
++**附带文件**：`films/<片名>/style/look-v<n>.png`（每张都列出来，标上第几张），以及每张用的提示词文件。
++
++**问题**：`这是 <张数> 张样帧，每张一种画风：<每张一句话描述>。用哪一张的画风？`
++
++**选项**：`用第 1 张`、`用第 2 张`、`用第 3 张`（只有 2 张就去掉第三项）、`都不行，重画（在其他里写想要的方向）`
++
++**选完之后**：
++
++- 选了某一张 → 把那张的画风写成一句话，追加进 `requirements.md`（`[G3] 画风：……`，后面所有提示词的【画风】段都用这句），`gates.G3 = "approved"`，接着画设定图（`stages/3-style.md` 第二部分）。
++- 都不行 → `gates.G3 = "rejected"`，按本人说的方向重写提示词，再画 2–3 张新版本，再问 G3。
++
++---
++
++## G3b：定设定图
++
++**什么时候问**：每个角色和固定道具的设定图都画好、你自己逐张看过以后。
++
++**附带文件**：`films/<片名>/style/sheet-<角色>-v<n>.png`（每个角色、道具各一张最新版），每张写明固定特征和位置（比如"纹身在左手臂"）。
++
++**问题**：`设定图画好了：<每张一句话：谁、固定特征在哪>。这样定吗？`
++
++**选项**：`设定图定了`、`要改（在其他里写哪张、哪里）`
++
++**选完之后**：
++
++- `设定图定了` → `gates.G3b = "approved"`，`stage = "keyframes"`，打开 `stages/4-keyframes.md`。
++- 要改 → `gates.G3b = "rejected"`，只重画要改的那张（新版本），再问 G3b。
++
++---
++
++## G4：报价（每批一次）
++
++**什么时候问**：这一批每个镜头的 `pre-submit` 审核都"通过"、`quote.ts` 退出 0 以后。每份报价问一次，一份报价只对应一次提交。
++
++**附带文件**：`films/<片名>/quotes/Q<n>.json`，以及这批每个镜头的 `shots/<镜头>/prompt-v<n>.txt`、`first-v<n>.png`、`last-v<n>.png`、`reviews/pre-submit-<镜头>-v<n>.md`。
++
++**问题前面的说明**（照 `quote.ts` 的输出和 `quotes/Q<n>.json` 写）：
++
++```
++报价 Q<n>
++镜头：S01（4.6 秒 → 计费 6 秒）、S02（……）
++模型：<mini 或 2.5>（<模型 id>，¥<单价>/秒，720p）
++合计：约 ¥<合计>　已花：¥<已花>　预算余额：¥<余额>
++金额是估算，以账单为准。网关提交时按每镜上限预扣（mini 每镜 15 秒），出片后按实际结算退差额，账户余额要够预扣。
++<是重拍或重试的话，写明是哪一镜、为什么、改了什么>
++```
++
++**问题**：`报价 Q<n>：<镜头数> 镜 <计费秒数> 秒，约 ¥<合计>。提交吗？`
++
++**选项**（固定写法，`<n>` 和金额照报价填）：
++
++- `批准 Q<n>（¥合计）`，例如 `批准 Q3（¥1.8）`
++- `改用 2.5 重新报价`——只有当本次报价用的是 mini、并且 `config/pricing.json` 里 `models["2.5"].firstLastFrame` 是 `true`（2.5 支持首尾帧）时才出现。现在的配置里它是 `false`，所以这一项不出现，只问 `批准 Q<n>（¥合计）` 和 `先不拍` 两项。检查命令：
++  `node -e "const p=JSON.parse(require('fs').readFileSync('config/pricing.json','utf8'));console.log(p.models['2.5'].firstLastFrame===true?'支持':'不支持')"`
++- `先不拍`
++
++**选完之后**：
++
++- `批准 Q<n>（¥合计）`（或本人在自由文字里明确写了"批准 Q<n>"）→ 在这一轮里运行
++  `node scripts/approve.ts <片名> Q<n> --said '<本人回答原文>'`
++  （原文用单引号包住；原文里有单引号就写成 `'\''`）。退出 0 → `gates.G4 = "approved"` → 运行 `node scripts/seedance.ts submit <片名> --quote Q<n>`，按 `stages/5-prompts.md` 处理结果。退出 1 → 把原因告诉本人，不提交。
++- `改用 2.5 重新报价` → 运行 `node scripts/quote.ts <片名> --shots <同样的镜头> --model 2.5`，用新报价号重新问 G4。旧报价留着，不批准它。
++- `先不拍` → `gates.G4 = "rejected"`，不运行 `approve.ts`，问本人想先改什么，等本人说。
++- 回答含糊（"可以""行""先这样"）→ 不算批准，原样再问一次 G4。
++- AskUserQuestion 用不了、改在对话里用编号选项问时：请本人原样打出 `批准 Q<n>`（或选项原文 `批准 Q<n>（¥合计）`）。只回一个数字不算批准，原样再问一次 G4。
++- `approve.ts` 只认两种回答：恰好是选项原文 `批准 Q<n>（¥合计）`（首尾空白不算）；或以 `批准 Q<n>` 开头、全文不含 不、别、勿、没、未、拒、取消、暂缓、撤、等、再说、？、?、吗。"好的，批准 Q3""批准 Q3？""先等等再批准 Q3"都不算，会退出 1；这时原样再问一次 G4，不改写本人的话。
++
++**超预算时**（`quote.ts` 退出 2，输出以"超预算："开头）：不问 G4，改问：
++
++- 问题：`这批要 ¥<合计>，加上已花 ¥<已花> 超过总预算 ¥<预算>。怎么办？`
++- 选项：`少拍几镜（在其他里写拍哪几镜）`、`先不拍`
++- 本人在自由文字里提高预算 → 改 `settings.budgetCNY`、记进 `requirements.md`，再运行 `quote.ts` 出新报价、问 G4。
++
++---
++
++## G5：看动态、听声音
++
++**什么时候问**：每一批片段下载完、你逐镜抽帧看过、能剪的剪掉、能用代码修的修好以后。每批都问，**试拍的那 1–2 镜也要问**：试拍行不行得通由本人在这里定，本人选"都可以"之前，不给其余镜头报价、不提交（`stages/6-generate.md` 第 4、5 步）。
++
++**附带文件**：每个镜头最新的 `films/<片名>/shots/<镜头>/clip-v<n>.mp4`（修过的话附修好的版本），以及你抽帧看到的问题清单。
++
++**问题前面的说明**必须写明：
++
++```
++我没看过动态、没听过声音。我只看了抽出来的帧：<每镜一句看到了什么、发现了什么、怎么处理的>。
++动作顺不顺、有没有抖、声音能不能用，要你看过、听过才算数。
++```
++
++**问题**：`请看一遍这批片段、听一下声音。这批可以用吗？`
++
++**选项**：`都可以`、`有镜头要处理（在其他里写哪一镜、哪里不对）`、`声音不用，后期另配`
++
++**选完之后**：
++
++- `都可以` → 这批镜头的 `status` 改成 `"accepted"`。还有没拍的镜头（比如刚看完的是试拍那批）→ 这时才照 `stages/5-prompts.md` 第 4–6 步给下一批报价、问 G4。全部镜头都 accepted → `gates.G5 = "approved"`，`stage = "post"`，打开 `stages/7-post.md`。
++- `有镜头要处理` → `gates.G5 = "rejected"`，按 `stages/6-generate.md` 的"有问题怎么办"处理那一镜（先剪、再代码修、最后才重拍，重拍要重新审核、重新报价、问 G4），处理完再问 G5。
++- `声音不用，后期另配` → 记进 `requirements.md`；后期不用片段自带的声音，其余同"都可以"。
++
++---
++
++## G6：成片验收
++
++**什么时候问**：`out/final-v<n>.mp4` 做好、切点前后 3 帧抽查过、`final` 审核做完以后。
++
++**附带文件**：`films/<片名>/out/final-v<n>.mp4`、`films/<片名>/reviews/final-v<n>.md`（审核回复，写明有哪些"硬伤"和"小问题"）
++
++**问题前面的说明**写明：我没看过动态、没听过声音；审核也只看了帧，查不了动态手感和声音。
++
++**问题**：`成片做好了（<时长> 秒，1920×1080）。验收吗？`
++
++**选项**：`验收`、`还要改（在其他里写时间和问题）`
++
++**选完之后**：
++
++- `验收` → `gates.G6 = "approved"`，`stage = "wrap"`，打开 `stages/8-wrap.md`。
++- `还要改` → `gates.G6 = "rejected"`，能在后期改的出新版本 `out/final-v<n+1>.mp4` 重新审 `final`；要重拍的回 `stages/6-generate.md`。改完再问 G6。
++
++---
++
++## 改图：首尾帧要改时（不编号）
++
++**什么时候问**：`keyframes` 审核或你自己按 8 项检查，发现某个镜头的首帧或尾帧要改的时候（方法论："有问题就告诉我是哪张图、哪里不对，我同意了再改"）。`requirements.md` 里关口编号写 `[改图-<镜头>]`。
++
++**附带文件**：要改的图、`reviews/keyframes-<镜头>-v<n>.md`、`frames.py compare` 的对比图。
++
++**问题**：`<镜头> 的 <首帧/尾帧> 有这些问题：<逐条：哪张图、哪里不对、打算怎么改>。照这样改吗？`
++
++**选项**：`照这样改`、`我来说怎么改（在其他里写）`
++
++**选完之后**：按本人的意思改（只改一小块时把改好的那一块贴回原图），存新版本，重新自检、重新审 `keyframes`。
++
++---
++
++## 审核卡住：同一项连续 3 次不通过（不编号）
++
++`requirements.md` 里关口编号写 `[审核卡住-<类型>-<镜头>]`。
++
++**附带文件**：三次的 `reviews/<类型>[-<镜头>]-v<n>.md`。
++
++**问题**：`<类型> <镜头> 的审核连续 3 次没通过，主要卡在：<逐条>。怎么改？`
++
++**选项**：`按审核说的改`、`换个拍法（在其他里写）`、`这一镜先不做`
++
++**选完之后**：照本人的意思改，再审；`这一镜先不做` → 这一镜 `status` 写 `"skipped"`，告诉本人片长会变短。
+diff --git a/.claude/skills/film-director/references/stages/2-board.md b/.claude/skills/film-director/references/stages/2-board.md
+index f18cabd..841fafe 100644
+--- a/.claude/skills/film-director/references/stages/2-board.md
++++ b/.claude/skills/film-director/references/stages/2-board.md
+@@ -22,21 +22,21 @@
+ 
+ 表格列（每镜一行，镜头号沿用 `story/shots-v<n>.md` 的 `S01`、`S02`……）：
+ 
+ | 镜头 | 片中时间 | 生成秒数 | 景别 | 机位 | 运镜 | 谁往哪走（画面左右） | 靠什么表情推进 | 这个镜头是什么在动 | 怎么转到下一个镜头 |
+ |---|---|---|---|---|---|---|---|---|---|
+ 
+ 写完自己对一遍 6 条要求：数一数平视正面有几次；有没有连着同样景别；每镜"什么在动"是不是至少一样；运镜有没有理由。
+ 
+ ### 2. 算时长：计费秒数
+ 
+-`quote.ts` 按 `state.shots.<镜头>.seconds`（片中时长）算计费秒数：向上取整；取整后余量不足（含等于）0.5 秒再加 1 秒；**最少按 4 秒计费**（网关下限）。mini 一段最长 15 秒，超了网关会拒绝。
++`quote.ts` 按 `state.shots.<镜头>.seconds`（片中时长）算计费秒数：向上取整；取整后余量不足（含等于）0.5 秒再加 1 秒；**最少按 4 秒计费**（网关下限）。mini 一段最长计费 15 秒（片中时长 14.4 秒以内），超了 `quote.ts` 会退出 2、提示"请拆镜头"，这时把这一镜拆成两镜。
+ 
+ | 片中时长 | 计费（生成）秒数 |
+ |---|---|
+ | 0.1–3.4 秒 | 4 |
+ | 3.5–4.4 秒 | 5 |
+ | 4.5–5.4 秒 | 6 |
+ | …… | …… |
+ | 13.5–14.4 秒 | 15（mini 上限，片中时长不要超过 14.4 秒） |
+ 
+ 设计时长时要想到这个下限：片中只用 2 秒的镜头也按 4 秒付钱，所以要么把这一镜设计成 3–3.4 秒用足，要么在分镜里写明"生成 4 秒、后期剪出最好的 2 秒"。"生成秒数"一列写计费秒数，它也是七段式提示词【镜头】里的"整段 X 秒"。
+diff --git a/.claude/skills/film-director/references/stages/4-keyframes.md b/.claude/skills/film-director/references/stages/4-keyframes.md
+index b62661a..1c7ab28 100644
+--- a/.claude/skills/film-director/references/stages/4-keyframes.md
++++ b/.claude/skills/film-director/references/stages/4-keyframes.md
+@@ -26,22 +26,22 @@
+ 
+ - 写 `shots/<镜头>/last-prompt-v<n>.txt`。
+ - `node scripts/codex-image.ts <片名> --kind last --out shots/<镜头>/last --prompt films/<片名>/shots/<镜头>/last-prompt-v<n>.txt --ref films/<片名>/style/sheet-<角色>-v<n>.png --ref films/<片名>/style/look-v<n>.png`
+   （画面里有几个角色就带几张设定图；和前一镜同一地点同一机位时，改用前一镜的图做 `--ref`，提示词写"在这张图上改"。）
+ - 出图存成 `shots/<镜头>/last-v<n>.png`。
+ 
+ ### 3. 在它上面改出另一张（一般是首帧）
+ 
+ - 写 `shots/<镜头>/first-prompt-v<n>.txt`：写明"在这张图上改：摄影机位置、构图、背景、光线完全不变，只改……"。
+ - `node scripts/codex-image.ts <片名> --kind first --out shots/<镜头>/first --prompt films/<片名>/shots/<镜头>/first-prompt-v<n>.txt --ref films/<片名>/shots/<镜头>/last-v<n>.png`
+-- 推近镜头：先画内容最多的首帧（远景），尾帧不画，用代码从首帧裁一块放大（`s` 是保留的比例，如 0.8；`l`、`t` 是裁切框左上角的像素位置；`'xb'` 保证不覆盖已有文件）：
+-  `.venv/Scripts/python -c "from PIL import Image; im=Image.open('films/<片名>/shots/<镜头>/first-v<n>.png').convert('RGB'); W,H=im.size; s=0.8; w,h=round(W*s),round(H*s); l,t=0,0; im.crop((l,t,l+w,t+h)).resize((W,H),Image.LANCZOS).save(open('films/<片名>/shots/<镜头>/last-v<m>.png','xb'),'PNG')"`
++- 推近镜头：先画内容最多的首帧（远景），尾帧不画，用代码从首帧裁一块放大（`s` 是保留的比例，如 0.8；`l`、`t` 是裁切框左上角的像素位置，默认 `(W-w)//2,(H-h)//2` 即居中裁切；推向画面某一侧时，把它改成那一侧，例如推向右下角的人物写 `l,t=W-w,H-h`，推向左边写 `l=0`，`l` 取 0 到 `W-w`、`t` 取 0 到 `H-h` 之间；`'xb'` 保证不覆盖已有文件）：
++  `.venv/Scripts/python -c "from PIL import Image; im=Image.open('films/<片名>/shots/<镜头>/first-v<n>.png').convert('RGB'); W,H=im.size; s=0.8; w,h=round(W*s),round(H*s); l,t=(W-w)//2,(H-h)//2; im.crop((l,t,l+w,t+h)).resize((W,H),Image.LANCZOS).save(open('films/<片名>/shots/<镜头>/last-v<m>.png','xb'),'PNG')"`
+ 
+ ### 4. 裁成 16:9、尺寸一致
+ 
+ - 输出里有"比例不是 16:9"：`.venv/Scripts/python scripts/py/frames.py crop169 films/<片名>/shots/<镜头>/last-v<n>.png films/<片名>/shots/<镜头>/last-v<n+1>.png`（首帧同理）。只裁不重画。
+ - 先裁尾帧再用裁好的尾帧改首帧，两张一般就一样大。确认尺寸：
+   `.venv/Scripts/python -c "from PIL import Image; print(Image.open('films/<片名>/shots/<镜头>/first-v<n>.png').size, Image.open('films/<片名>/shots/<镜头>/last-v<n>.png').size)"`
+   不一样就把其中一张用 LANCZOS 缩放到另一张的尺寸，存新版本。
+ - 提交和审核都只认每种文件编号最大的那一版，所以裁好、修好的版本一定要是最新编号。
+ 
+ ### 5. 局部改动要贴回原图
+diff --git a/.gitattributes b/.gitattributes
+new file mode 100644
+index 0000000..8fcc731
+--- /dev/null
++++ b/.gitattributes
+@@ -0,0 +1,4 @@
++# 文本统一用 LF；Windows 脚本保留 CRLF。二进制文件（png、mp4、pdf……）由 text=auto 自动识别，不做转换。
++* text=auto eol=lf
++*.cmd text eol=crlf
++*.ps1 text eol=crlf
+diff --git a/README.md b/README.md
+index 376ad13..a749003 100644
+--- a/README.md
++++ b/README.md
+@@ -52,21 +52,21 @@ winget install Gyan.FFmpeg
+ 
+ 脚本会自己找：先看环境变量 `FFMPEG` / `FFPROBE`（完整路径），再看 PATH，最后看 winget 的安装目录。所以装完不用开新 shell，也可以用这两个变量指定别的版本。
+ 
+ ### 6. 视频网关的 Key 和地址（你自己设）
+ 
+ 视频走第三方 new-api 网关 `https://newapi.dragon3api.com`（`POST /v1/videos`）。
+ 
+ | 环境变量 | 必须 | 说明 |
+ |---|---|---|
+ | `SEEDANCE_API_KEY` | 是 | 网关的 Key。只设在你的用户环境变量里，**不要写进任何文件，也不要发到对话里** |
+-| `SEEDANCE_BASE_URL` | 否 | 不设就用 `https://newapi.dragon3api.com`；试跑用假网关时才设成 `http://127.0.0.1:<端口>` |
++| `SEEDANCE_BASE_URL` | 否 | 不设就用 `https://newapi.dragon3api.com`；试跑用假网关时才设成 `http://127.0.0.1:<端口>`。每个任务记下提交时的网关地址，之后查询、下载只去同一个地址；中途改了地址，`poll`/`fetch`/`wait` 会说"当前网关地址不同，跳过"，改回来再等 |
+ 
+ ```powershell
+ [Environment]::SetEnvironmentVariable('SEEDANCE_API_KEY', '<你的key>', 'User')
+ # 可选：
+ # [Environment]::SetEnvironmentVariable('SEEDANCE_BASE_URL', 'https://newapi.dragon3api.com', 'User')
+ ```
+ 
+ 设完**重启 Claude 桌面端**，已经开着的会话读不到新设的变量。导演开工时只检查 Key"有/没有"，从不打印它。
+ 
+ ### 模型和价格
+@@ -108,46 +108,55 @@ films/<片名>/
+   state.json        当前阶段 stage、设置 settings、关口 gates、镜头 shots、已花 spentCNY
+   brief.md          一句话想法
+   requirements.md   你说过的每句话（追加）
+   story/            逐镜故事
+   board/            分镜表、配色、色块草图、黑白检查图
+   style/            样帧、设定图
+   shots/<镜头>/     提示词、首帧、尾帧、视频片段（都按 -v<n> 存新版本，不覆盖）
+   reviews/          每次审核的提示词、回复和记录
+   quotes/           报价 Q<n>.json
+   approvals/        你的批准记录 Q<n>.json（含你的原话）
+-  spend.jsonl       花费账本（每提交一个任务一行）
++  spend.jsonl       花费账本（每提交一个任务一行；结果不明的提交核对后再追加一行核对记录）
+   post/  out/       后期中间文件、成片 final-v<n>.mp4
+   lessons.md        收尾总结（含总花费）
+ ```
+ 
+ 最快的办法是看 `state.json` 的 `stage` 和 `gates`；花了多少以 `spend.jsonl` 为准。
+ 
+ ## 五、花钱规则
+ 
+ 1. **先报价**：一批镜头的提交前审核都通过后，导演运行 `quote.ts` 出报价 Q<n>（镜头、计费秒数、金额、已花、预算余额）。超预算的报价不能批准。
+-2. **你批准**：只有你在这一轮回答里选了或亲手写了 `批准 Q<n>`，导演才运行 `approve.ts` 记下你的原话。"可以""行"不算批准，它会再问一次。旧的批准不能用于新报价。
++2. **你批准**：只有你在这一轮回答里选了或亲手写了 `批准 Q<n>`，导演才运行 `approve.ts` 记下你的原话。"可以""行"、只回一个选项编号、"批准 Q3？""先等等再批准 Q3"这类带否定、疑问或拖延的话都不算批准，它会再问一次。旧的批准不能用于新报价。
+ 3. **7 道闸门**：`seedance.ts submit` 提交前逐条检查——报价存在且不超预算、模型支持首尾帧且价格一致、每镜提交前审核通过、审核后提示词和首尾帧没改过、你批准了这份报价且金额一致、按 `spend.jsonl` 现算不超预算、这份报价没提交过。任何一条不满足就不提交。
+ 4. **先试拍**：先拍 1–2 镜，你在 G5 看过动态、听过声音、选了"都可以"，才给其余镜头报价。
+ 5. **不充值、不买额度**（Codex 和网关都是）。网关返回欠费就停，用已有片段粗剪一版给你看。
+ 6. **`.submit.lock` 不要随手删**：`submit` 退出 7（网关已建任务、但没记上账）时锁会留着。先到网关任务日志核对那个任务，把命令输出里"应补记的那一行"补进 `spend.jsonl`，确认无误后再由你自己删锁。导演不会自己删锁、补账或重发。
+ 7. 所有金额都是按网关公开价目算的**估算**，以网关账单为准。
+ 
+ ## 六、常见问题
+ 
+ **Codex 额度用完了**：`codex-image.ts` 退出 5，导演会停止画图并告诉你。等额度恢复后说"继续做《片名》"或"继续画"。不会替你买额度。
+ 
+ **Codex 报"requires a newer version of Codex"**：CLI 太旧，按"前置条件 3"升级，注意两个 npm 全局目录的问题，然后 `codex --version` 确认。
+ 
+ **网关欠费**：`submit` 退出 4，其余镜头不提交。你自己决定是否去网关充值；充值后说"继续做《片名》"，导演会重新报价、再问你批准。
+ 
+-**提交结果不明 / 另一个提交正在进行**：可能已经扣费。不要重发，到网关任务日志核对；锁文件按"花钱规则 6"处理。
++**提交结果不明**：可能已经扣费，已经按扣费记账。不要重发。导演会把原文告诉你；你到网关后台的任务日志查这一镜建没建成任务，查清后由你决定是否核对，把结果告诉导演（任务号，或"没建成"），导演才运行：
++
++```powershell
++node scripts/seedance.ts reconcile <片名> --quote Q<n> --shot S01 --task <任务号> --note "<你的说明>"   # 建成了：之后 wait 会下载它
++node scripts/seedance.ts reconcile <片名> --quote Q<n> --shot S01 --not-created --note "<你的说明>"   # 没建成：已花金额扣回这一镜
++```
++
++核对只往 `spend.jsonl` 追加一行，不改旧行；每一镜只能核对一次。这份报价照旧不能再提交（闸门 7），没建成的镜头要拍就重新报价。
++
++**另一个提交正在进行**：可能已经扣费。不要重发，到网关任务日志核对；锁文件按"花钱规则 6"处理。
+ 
+ **某镜生成失败**：参数问题会改完重审、重新报价；临时错误要你先在网关日志或账单确认那次没扣费，才同样内容重新报价重拍。
+ 
+ **会话关了**：见"三、继续做一支片子"。正在生成的视频不受影响，下次进来导演会接着等、接着下载。
+ 
+ **设了 Key 但导演说"没有"**：设完环境变量要重启 Claude 桌面端。
+ 
+ **导演看不到动态、听不到声音**：它只能看抽出来的帧。动作顺不顺、声音能不能用，要你在 G5 和 G6 亲自看、亲自听。
+ 
+ ## 七、测试
+diff --git a/config/pricing.json b/config/pricing.json
+index 813c829..6606eda 100644
+--- a/config/pricing.json
++++ b/config/pricing.json
+@@ -1,4 +1,4 @@
+ { "default": "mini",
+   "models": {
+-    "mini": { "id": "seedance-2.0-mini", "cnyPerSecond720p": 0.15, "firstLastFrame": true },
+-    "2.5":  { "id": "seedance-2.5",      "cnyPerSecond720p": 0.55, "firstLastFrame": false } } }
++    "mini": { "id": "seedance-2.0-mini", "cnyPerSecond720p": 0.15, "firstLastFrame": true,  "maxSeconds": 15 },
++    "2.5":  { "id": "seedance-2.5",      "cnyPerSecond720p": 0.55, "firstLastFrame": false, "maxSeconds": 30 } } }
+diff --git a/docs/superpowers/plans/2026-11-07-ai-film-autoloop.md b/docs/superpowers/plans/2026-11-07-ai-film-autoloop.md
+index 8e69bae..43126b0 100644
+--- a/docs/superpowers/plans/2026-11-07-ai-film-autoloop.md
++++ b/docs/superpowers/plans/2026-11-07-ai-film-autoloop.md
+@@ -1,455 +1,455 @@
+-# AI 短片制作系统 实施计划
+-
+-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+-
+-**Goal:** 把方法论落成 agent-autoloop 的场景模板：一条导演规则 + 导演 Skill + 一组带闸门的脚本，本人只靠卡片拍板就能从一句想法做到 1080p 成片。
+-
+-**Architecture:** agent-autoloop 中台按 `recipe/rules.json` 把 `film.new` 事件派给 Claude Code（导演），导演每轮读 `films/<片名>/state.json` 推进一个阶段，用 `ask` 卡片过关口、用 `later` 等出片。画图、审核、报价、提交视频、后期都是 `scripts/` 里的命令，花钱和阶段规矩在脚本里强制检查。审核是导演这一轮里另起的只读 `claude -p` 进程。
+-
+-**Tech Stack:** Node 24（直接跑 `.ts`，内置 `node:test`，零 npm 依赖），Python 3.14 + Pillow（项目 `.venv`），ffmpeg，agent-autoloop，Claude Code 2.1.x，Codex CLI 0.77，火山方舟 Seedance API。
+-
+-**Spec:** `docs/superpowers/specs/2026-11-07-ai-film-autoloop-design.md`（以"修订 R1"一节为准）
+-
+-## Global Constraints
+-
+-- 所有产物只新建、不覆盖、不删除；同名产物用 `-v<n>` 递增。唯一例外是 `state.json`（状态文件，原地更新）和追加写的 `spend.jsonl`、`requirements.md`。
+-- 默认模型 `seedance-2.0-mini`（网关价 720p ¥0.15/秒）；可选 `seedance-2.5`（¥0.55/秒，首尾帧支持核实前不可用）。单价只放在 `config/pricing.json`。（R1）
+-- 计费秒数：片中时长向上取整；若 `取整值 − 片中时长 < 0.5` 再加 1 秒。
+-- 视频接口：第三方 new-api 网关 `POST {SEEDANCE_BASE_URL}/v1/videos`，`SEEDANCE_BASE_URL` 默认 `https://newapi.dragon3api.com`；Key 只从环境变量 `SEEDANCE_API_KEY` 读，永不打印、不进日志、不写文件。（R1）
+-- Codex 调用：`codex exec --skip-git-repo-check -s read-only -i <参考图> - < <提示词>`，提示词开头固定为 `Use your image generation tool to create exactly ONE image. Do not run shell commands.`
+-- 审核：导演会话开的只读子 agent；`review.ts` 只做 prepare/record，不启动模型。（R1）
+-- 外部命令可用环境变量覆盖成 JSON 数组（测试用假程序）：`FILM_CODEX_CMD`；Codex 出图目录用 `FILM_CODEX_IMAGES` 覆盖（默认 `~/.codex/generated_images`）。
+-- 项目根用 `FILM_ROOT` 覆盖（默认仓库根），测试一律在临时目录里跑。
+-- 导演是本人在 Claude 桌面端开的 Code 会话（工作目录 = 本项目），Skill 在 `.claude/skills/film-director/`；agent-autoloop 不参与制作流程。（R1）
+-- 事项编号固定为 `film:<片名>`；片名只允许 `[A-Za-z0-9_\-\u4e00-\u9fa5]{1,40}`。
+-- 不充值、不买额度；Seedance 返回欠费即停。
+-- 测试命令：`node --test tests/`（Node），`.venv/Scripts/python -m unittest discover -s tests/py`（Python）。
+-
+-## Review Focus
+-
+-1. **审核后又改了文件**：提示词或首尾帧在 `pre-submit` 审核之后被改过，提交必须被拒绝。由 Task 5 的 `rejects files changed after review` 测试覆盖。
+-2. **同一份报价重复提交**：导演在不同轮次里对同一个 `Q<n>` 调了两次 `submit`，第二次必须被拒绝，`spend.jsonl` 里不能多出一行。由 Task 5 的 `rejects quote already submitted` 测试覆盖。
+-3. **卡片的回答不是"批准"**：本人选了"先不拍"或写了自由文字，或者卡片属于别的片子（`lane` 不同），都不能算批准。由 Task 4 的三条 `findApproval` 测试覆盖。
+-4. **中途欠费**：一批 3 个镜头提交到第 2 个时接口返回欠费。第 1 个的花费要记下，第 2、3 个不提交，命令以非零码退出并输出"欠费"。由 Task 5 的 `stops batch on arrears` 测试覆盖。
+-5. **审核输出没有明确结论**：模型最后一行写"基本通过"或者干脆没写，都必须记为"不通过"。由 Task 3 的 `parseVerdict` 测试覆盖。
+-
+----
+-
+-## 文件结构
+-
+-| 文件 | 职责 |
+-|---|---|
+-| `package.json` | `"type": "module"`，`scripts.test = "node --test tests/"`，无依赖 |
+-| `.gitignore` | `films/`、`.venv/`、`*.env`、`node_modules/` |
+-| `config/pricing.json` | 模型 id → 每秒单价、默认模型 |
+-| `config/reviews.json` | 每类审核需要的资料文件模式 |
+-| `scripts/lib/paths.ts` | 项目根、片子目录、片名校验 |
+-| `scripts/lib/versioned.ts` | 取下一个版本路径、只新建写入 |
+-| `scripts/lib/hash.ts` | 文件 SHA-256 |
+-| `scripts/lib/state.ts` | `state.json` 的类型、读写、关口判断 |
+-| `scripts/lib/proc.ts` | 按环境变量覆盖解析外部命令并运行 |
+-| `scripts/lib/hub.ts` | 读中台状态、核对卡片批准、发事件 |
+-| `scripts/lib/ark.ts` | 方舟接口：建任务、查任务、下载 |
+-| `scripts/new-film.ts` | 开新片 |
+-| `scripts/quote.ts` | 报价 |
+-| `scripts/review.ts` | 隔离审核 |
+-| `scripts/seedance.ts` | `submit` / `poll` / `fetch` |
+-| `scripts/codex-image.ts` | 画一张图（带阶段闸门） |
+-| `scripts/py/sketch.py` `grayscale.py` `frames.py` `post.py` | 色块草图、黑白检查、抽帧/裁切、后期 |
+-| `skills/film-director/**` | 导演 Skill 和方法论参考资料 |
+-| `recipe/rules.json`、`README.md` | autoloop 规则与启用说明 |
+-| `tests/*.test.ts`、`tests/fakes/*`、`tests/py/test_*.py` | 测试与假程序 |
+-
+-所有 CLI 脚本都遵循同一约定：`export async function main(argv: string[]): Promise<number>` 返回退出码；文件末尾 `if (import.meta.main) process.exit(await main(process.argv.slice(2)))`；面向导演的输出是中文一句话，机器可读结果用 `--json` 输出。测试直接调 `main` 或导出的纯函数。
+-
+----
+-
+-### Task 0: 项目骨架与基础库
+-
+-**Files:**
+-- Create: `package.json`、`.gitignore`、`config/pricing.json`、`scripts/lib/paths.ts`、`scripts/lib/versioned.ts`、`scripts/lib/hash.ts`
+-- Test: `tests/lib.test.ts`
+-
+-**Interfaces:**
+-- Produces:
+-  - `projectRoot(): string`（`FILM_ROOT` 优先）
+-  - `filmDir(film: string): string`；`assertFilmName(film: string): void`（不合法时抛错 `片名不合法：<片名>`）
+-  - `nextVersionPath(dir: string, base: string, ext: string): string`，返回 `<dir>/<base>-v<n>.<ext>`，n 为已有最大值 +1，从 1 开始
+-  - `writeNew(path: string, data: string | Uint8Array): void`，用 `flag: "wx"`，已存在就抛错
+-  - `sha256File(path: string): string`（小写十六进制）
+-
+-- [ ] **Step 1:** 执行前问本人是否用 git 管理本项目；同意则 `git init` 并在后续每个任务末尾提交，不同意则跳过所有提交步骤。
+-- [ ] **Step 2: 写失败测试** `tests/lib.test.ts`：
+-  - `nextVersionPath` 在空目录返回 `plan-v1.md`；已有 `plan-v1.md`、`plan-v3.md` 时返回 `plan-v4.md`。
+-  - `writeNew` 写已存在的文件抛错，原内容不变。
+-  - `assertFilmName("雨夜邮差")` 不抛；`assertFilmName("../x")`、`assertFilmName("")` 抛错。
+-  - `sha256File` 对内容 `abc` 返回 `ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad`。
+-- [ ] **Step 3:** 运行 `node --test tests/lib.test.ts`，预期 FAIL（模块不存在）。
+-- [ ] **Step 4:** 实现上述函数；写 `config/pricing.json`：
+-  ```json
+-  { "default": "mini",
+-    "models": {
+-      "mini": { "id": "doubao-seedance-2-0-mini-260615", "cnyPerSecond720p": 0.5 },
+-      "2.5":  { "id": "doubao-seedance-2-5-260628",      "cnyPerSecond720p": 1.5 } } }
+-  ```
+-- [ ] **Step 5:** 运行 `node --test tests/lib.test.ts`，预期 PASS。
+-- [ ] **Step 6:** 提交 `chore: 项目骨架与基础库`。
+-
+-### Task 1: 片子状态与开新片
+-
+-**Files:**
+-- Create: `scripts/lib/state.ts`、`scripts/lib/hub.ts`（只先写 `emitEvent`）、`scripts/new-film.ts`
+-- Test: `tests/state.test.ts`、`tests/new-film.test.ts`
+-
+-**Interfaces:**
+-- Consumes: Task 0 全部
+-- Produces:
+-  ```ts
+-  type Stage = "setup"|"story"|"board"|"style"|"keyframes"|"prompts"|"generate"|"post"|"wrap"|"done";
+-  type GateId = "G0"|"G1"|"G2"|"G3"|"G3b"|"G4"|"G5"|"G6";
+-  type GateState = "pending"|"asked"|"approved"|"rejected";
+-  interface Shot { seconds: number; status: string; clip: string | null }
+-  interface FilmState {
+-    film: string; stage: Stage;
+-    settings: { seconds: number|null; aspect: string; budgetCNY: number|null; music: string|null; subtitles: boolean; model: "mini"|"2.5" };
+-    gates: Partial<Record<GateId, GateState>>;
+-    shots: Record<string, Shot>;   // 键形如 "S01"
+-    spentCNY: number;
+-  }
+-  readState(film: string): FilmState
+-  writeState(state: FilmState): void            // 先写 state.json.tmp 再 rename
+-  isApproved(state: FilmState, gate: GateId): boolean
+-  emitEvent(event: { id: string; type: string; subject: string; summary: string }): Promise<{ event: number }>
+-  ```
+-  `new-film.ts <片名> "<一句话想法>" [--no-emit]`：建 `films/<片名>/` 及子目录 `story board style shots reviews quotes approvals post out`，写 `brief.md`（想法原文）、`requirements.md`（首行 `# 本人要求`，第一条为想法原文）、`state.json`（`stage: "setup"`，`settings.aspect: "16:9"`，`model: "mini"`，其余为 null/空），然后发事件 `{ id: "film.new:<片名>", type: "film.new", subject: "film:<片名>", summary: <想法前 200 字> }`。
+-
+-- [ ] **Step 1: 写失败测试**：
+-  - `writeState` 再 `readState` 得到同一对象；`isApproved` 对缺失关口返回 false。
+-  - `new-film` 带 `--no-emit` 在临时 `FILM_ROOT` 下建出全部目录和三个文件，`state.stage === "setup"`。
+-  - 片子目录已存在时 `main` 返回非零，且不改动已有文件。
+-  - 不带 `--no-emit` 时，对本地假中台（`node:http` 起在随机端口，`AGENT_AUTOLOOP_URL` 指向它）发出的请求体 `subject === "film:测试片"`、`Authorization: Bearer <AGENT_AUTOLOOP_FILM_KEY>`。
+-  - 没设 `AGENT_AUTOLOOP_FILM_KEY` 时目录照建，退出码非零并输出 `没有发出事件：缺少 AGENT_AUTOLOOP_FILM_KEY`。
+-- [ ] **Step 2:** `node --test tests/state.test.ts tests/new-film.test.ts`，预期 FAIL。
+-- [ ] **Step 3:** 实现。
+-- [ ] **Step 4:** 同一命令，预期 PASS。
+-- [ ] **Step 5:** 提交 `feat: 片子状态与开新片`。
+-
+-### Task 2: 报价
+-
+-**Files:**
+-- Create: `scripts/quote.ts`
+-- Test: `tests/quote.test.ts`
+-
+-**Interfaces:**
+-- Consumes: `readState`、`nextVersionPath`、`writeNew`、`sha256File`、`config/pricing.json`
+-- Produces:
+-  ```ts
+-  billableSeconds(seconds: number): number
+-  interface Quote { id: string; film: string; model: "mini"|"2.5"; modelId: string;
+-    shots: { shot: string; seconds: number; billable: number; reviewHash: string }[];
+-    totalCNY: number; spentCNY: number; budgetCNY: number; overBudget: boolean; createdAt: string }
+-  buildQuote(film: string, shots: string[], model?: "mini"|"2.5"): Quote
+-  ```
+-  `quote.ts <片名> --shots S01,S02 [--model mini|2.5]` 写 `quotes/Q<n>.json`（n 递增，从 1 开始），打印 `报价 Q<n>：<镜头数> 镜 <秒> 秒 <模型> 约 ¥<合计>（估算，以账单为准）；已花 ¥x，预算余 ¥y`。超预算时 `overBudget: true`，打印以 `超预算` 开头，退出码 2。`reviewHash` 是该镜头最新 `pre-submit` 审核 `.json` 文件的哈希；没有通过的审核时 `buildQuote` 抛错 `S0x 还没有通过提交前审核`。`spentCNY` 取自 `spend.jsonl` 各行 `cny` 之和。
+-
+-- [ ] **Step 1: 写失败测试**：`billableSeconds(4) === 5`、`(4.4) === 5`、`(4.5) === 6`、`(4.6) === 6`、`(0.3) === 2`；两镜各 4.4 秒用 mini 合计 `5.0`；用 2.5 合计 `15.0`；预算 10、已花 6、报价 5 时 `overBudget === true` 且退出码 2；镜头没有审核时报错信息包含 `还没有通过提交前审核`；连续两次报价得到 `Q1`、`Q2`。
+-- [ ] **Step 2:** `node --test tests/quote.test.ts`，预期 FAIL。
+-- [ ] **Step 3:** 实现；金额保留 1 位小数（`Math.round(x*10)/10`）。
+-- [ ] **Step 4:** 预期 PASS。
+-- [ ] **Step 5:** 提交 `feat: 报价`。
+-
+-### Task 3: 审核的准备与记录（R1）
+-
+-**Files:**
+-- Create: `scripts/review.ts`、`config/reviews.json`、`.claude/skills/film-director/references/reviews/story.md`、`keyframe-plan.md`、`keyframes.md`、`pre-submit.md`、`final.md`
+-- Test: `tests/review.test.ts`
+-
+-**Interfaces:**
+-- Consumes: Task 0（`filmDir`、`nextVersionPath`、`writeNew`、`sha256File`）、Task 2 读审核记录的约定
+-- Produces:
+-  ```ts
+-  type ReviewKind = "story"|"keyframe-plan"|"keyframes"|"pre-submit"|"final";
+-  parseVerdict(text: string): "pass"|"fail"
+-  materialsFor(kind: ReviewKind, film: string, shot?: string): string[]   // 绝对路径，按 config/reviews.json 取每类模式下最新版本
+-  interface ReviewRecord { kind: ReviewKind; film: string; shot: string|null; verdict: "pass"|"fail"; at: string; files: Record<string, string> } // 绝对路径 → sha256
+-  ```
+-  - `review.ts prepare <类型> <片名> [--shot S03]`：
+-    - 取下一个编号 n，写 `reviews/<类型>[-<镜头>]-v<n>.prompt.md`；
+-    - 内容 = 清单全文 + `\n\n资料（只读这些文件，不要读别的）：\n` + 每行一个绝对路径 + `\n本人要求：` + `requirements.md` 绝对路径 + `\n\n最后一行只写"通过"或"不通过"。`；
+-    - 同时写同名 `.prompt.json` = `{ kind, film, shot, n, files: {路径: sha256} }`；
+-    - 打印提示词文件路径（`/` 分隔），退出 0；
+-    - 资料缺失时退出 3，输出以 `缺少资料：` 开头，不写任何文件；
+-    - 提示词里不能出现 `state.json` 或 `reviews/` 下的任何路径。
+-  - `review.ts record <片名> --prompt <prompt.md 路径> --reply <回复文件>`：
+-    - 读同名 `.prompt.json`，逐个重算哈希，有变化就退出 3，输出 `审核期间文件变了：<相对路径>`；
+-    - 否则写 `reviews/<类型>[-<镜头>]-v<n>.md`（回复原文）和 `.json`（`ReviewRecord`，`files` 取自 `.prompt.json`）；
+-    - 打印 `审核 <类型>：通过|不通过（reviews/...md）`；通过退出 0，不通过退出 1。
+-  - `config/reviews.json` 的模式（相对片子目录，`*` 取最新版本），同原 Task 3：
+-    - story → `story/shots-v*.md`
+-    - keyframe-plan → `shots/<镜头>/plan-v*.md`、`board/storyboard-v*.md`
+-    - keyframes → `shots/<镜头>/first-v*.png`、`last-v*.png`、`style/sheet-*-v*.png`（每个角色取最新）、`shots/<镜头>/plan-v*.md`
+-    - pre-submit → `shots/<镜头>/prompt-v*.txt`、`first-v*.png`、`last-v*.png`、`style/sheet-*-v*.png`、`board/storyboard-v*.md`、`board/palette-v*.md`
+-    - final → `out/final-v*.mp4` 和 `out/final-v*-frames/` 下的全部图片
+-
+-- [ ] **Step 1:** 写 5 份清单，内容取方法论原文（`.superpowers/sdd/2026-11-07-ai-film-autoloop/methodology.txt`）：
+-  - story = PDF 第 6 页"这是一支短片的逐镜头故事…"清单；
+-  - keyframe-plan = 第 10 页"先写首帧画什么、尾帧画什么、中间发生什么"，套用 keyframes 的 8 项；
+-  - keyframes = 第 10–11 页 8 项检查；
+-  - pre-submit = 第 12–13 页"你是审核，只读不改…"清单；
+-  - final = 第 14 页全片复核清单。
+-  - 每份开头写：`你是第一次看这些材料的审核，只读不改，不要写或改任何文件。图片要用 Read 打开放大看。`
+-  - 每份结尾加一项：`对照本人要求文件，列出被忘掉的要求。`
+-- [ ] **Step 2: 写失败测试**：
+-  - `parseVerdict`：
+-    - `"…\n通过"` → pass；
+-    - `"…\n不通过"`、`"…\n基本通过"`、`"通过\n还有一条建议"`、`""` → fail；
+-    - 规则：只看去掉空白和 Markdown 加粗后的最后一个非空行，它恰好等于"通过"才算 pass。
+-  - `prepare`：写出 `.prompt.md` 和 `.prompt.json`；提示词里列出提示词、首帧、尾帧的绝对路径；不含 `state.json` 或 `reviews/` 路径；缺首帧时退出 3 且不写文件。
+-  - `record`：
+-    - 回复末行"通过"时退出 0，写出 `.md` 和 `.json`，`.json` 字段与 `ReviewRecord` 一致；
+-    - 在 prepare 和 record 之间往提示词文件追加一个字 → 退出 3，输出含 `审核期间文件变了`；
+-    - 连续两轮得到 `-v1` 和 `-v2`。
+-  - 集成：record 一份 pre-submit 通过之后，Task 2 的 `buildQuote` 能对这个镜头报价，不抛错。
+-- [ ] **Step 3:** `node --test tests/review.test.ts`，预期 FAIL。
+-- [ ] **Step 4:** 实现。
+-- [ ] **Step 5:** 预期 PASS，`npm test` 全部通过。
+-- [ ] **Step 6:** 提交 `feat: 审核的准备与记录`。
+-
+-### Task 4: 批准记录（R1，替代原"中台批准核对"）
+-
+-**Files:**
+-- Create: `scripts/approve.ts`
+-- Test: `tests/approve.test.ts`
+-
+-**Interfaces:**
+-- Consumes: Task 0；Task 2 的 `Quote` 和 `quotes/Q<n>.json`
+-- Produces：
+-  - `approve.ts <片名> Q3 --said "<本人在对话里的原话>"`：
+-    - 用 `writeNew` 写 `approvals/Q3.json` = `{ quote: "Q3", totalCNY, model, shots: [...], said, at }`，已存在就报错；
+-    - 下面几种情况都退出 1，且不写文件：
+-      - 报价不存在 → `报价 Q3 不存在`；
+-      - 报价 `overBudget: true` → `报价 Q3 超预算，不能批准`；
+-      - `said` 里不含 `批准 Q3` → `本人原话里没有"批准 Q3"`；
+-      - 已经批准过 → `报价 Q3 已经批准过`；
+-    - 成功时打印 `已记下批准：Q3 ¥<合计>`。
+-  - 导出 `readApproval(film: string, quoteId: string): { quote: string; totalCNY: number; said: string; at: string } | null`，给 Task 5 用。
+-
+-- [ ] **Step 1: 写失败测试**：每种拒绝情况各一条，成功一条；`readApproval` 对不存在的报价返回 null。
+-- [ ] **Step 2:** `node --test tests/approve.test.ts`，预期 FAIL。
+-- [ ] **Step 3:** 实现。
+-- [ ] **Step 4:** 预期 PASS。
+-- [ ] **Step 5:** 提交 `feat: 批准记录`。
+-
+-### Task 5: Seedance（第三方网关）提交、查询、等待、下载（R1）
+-
+-**Files:**
+-- Create: `scripts/lib/video-api.ts`、`scripts/seedance.ts`、`tests/fakes/video-server.ts`
+-- Modify: `config/pricing.json`、`tests/quote.test.ts`（期望金额随新单价调整）
+-- Test: `tests/seedance.test.ts`
+-
+-**Interfaces:**
+-- Consumes: Task 0–4（`readState`、`writeState`、`Quote`、`ReviewRecord`、`readApproval`、`sha256File`、`nextVersionPath`）
+-- Produces:
+-  ```ts
+-  createTask(req: { model: string; prompt: string; firstFrame: string; lastFrame: string; seconds: number; resolution: "720p" }): Promise<{ id: string }>
+-  getTask(id: string): Promise<{ status: "queued"|"running"|"succeeded"|"failed"; videoUrl?: string; error?: string }>
+-  downloadVideo(id: string, url: string | undefined, dest: string): Promise<void>
+-  class ArrearsError extends Error {}     // 余额或额度不足
+-  checkGates(film: string, quoteId: string): string[]   // 空数组 = 通过
+-  ```
+-- `config/pricing.json` 改为：
+-  ```json
+-  { "default": "mini",
+-    "models": {
+-      "mini": { "id": "seedance-2.0-mini", "cnyPerSecond720p": 0.15, "firstLastFrame": true },
+-      "2.5":  { "id": "seedance-2.5",      "cnyPerSecond720p": 0.55, "firstLastFrame": false } } }
+-  ```
+-  `firstLastFrame` 只有在 Step 1 从网关或 new-api 文档确认支持后，才能改成 true。
+-- 命令：
+-  - `seedance.ts submit <片名> --quote Q3`：
+-    - 先调 `checkGates`，有原因就逐条打印，退出 1，不发任何请求；
+-    - 通过后逐镜头用最新的 `prompt-v*.txt`、`first-v*.png`、`last-v*.png` 建任务；
+-    - 每成功一个，就向 `spend.jsonl` 追加一行 `{"at","quote","shot","task","model","billable","cny"}`，并更新 `state.spentCNY` 和 `state.shots[镜头].status = "generating"`；
+-    - 遇到 `ArrearsError` 立即停止，打印 `欠费：已提交 <n> 镜，其余未提交`，退出 4。
+-  - `poll <片名>`：查询所有还没下载的任务；全部结束退出 0，还有在跑的退出 10；`--json` 输出数组。
+-  - `fetch <片名>`：把成功的视频下载到 `shots/<镜头>/clip-v<n>.mp4`，更新 `state.shots[镜头].clip`；失败的任务打印原因。
+-  - `wait <片名> [--interval 30] [--timeout 3600]`：反复 poll 直到全部结束，然后 fetch；结束退出 0，超时退出 6 并输出 `还没出完，稍后再 wait`。导演在后台运行它。
+-- `checkGates` 的检查顺序和文案：
+-  1. `报价 Q3 不存在` / `报价 Q3 超预算，不能提交`
+-  2. `模型 <id> 不支持首尾帧`（pricing 里 `firstLastFrame` 不为 true）
+-  3. `S01 的提交前审核不是"通过"`
+-  4. `S01 审核后改过文件：<相对路径>`：最新审核记录里的哈希和现在的文件不一致，或者现在最新的提示词、首帧、尾帧已经不是当时审核的那个
+-  5. `报价 Q3 还没有本人批准`：`readApproval` 返回 null，或批准记录的 `totalCNY` 和报价对不上
+-  6. `花费会超预算：已花 ¥x + 本次 ¥y > 预算 ¥z`
+-  7. `报价 Q3 已经提交过`：`spend.jsonl` 里已有 `quote === "Q3"` 的行
+-- 环境变量：
+-  - `SEEDANCE_BASE_URL`：默认 `https://newapi.dragon3api.com`；
+-  - `SEEDANCE_API_KEY`：没设就退出 1，输出 `没有设置 SEEDANCE_API_KEY`；
+-  - Key 永远不出现在任何输出、日志或文件里。
+-
+-- [ ] **Step 1:** 核实网关接口，**不发任何会扣费的请求**。
+-  - 资料：
+-    - `.superpowers/sdd/2026-11-07-ai-film-autoloop/gateway-notes.md` 和 `gateway-pricing.json`；
+-    - new-api 官方文档和源码（https://github.com/QuantumNous/new-api，视频任务的 relay 部分，以及豆包/Seedance 适配器）；
+-    - 网关首页公开的文档页（如果有）。
+-  - 要查清：
+-    - `POST /v1/videos` 的请求格式：JSON 还是 multipart；模型、提示词、时长 `seconds`、分辨率怎么写；首帧和尾帧怎么传（base64 data URL 还是网址，用什么字段名）；
+-    - 查询接口和下载接口；
+-    - 余额或额度不足时返回的 HTTP 状态码和错误文案；
+-    - 允许的时长范围，据此修正 Task 2 里 `billableSeconds` 的 2 秒下限；
+-    - `seedance-2.5` 是否支持首尾帧。
+-  - 结论写进 `scripts/lib/video-api.ts` 顶部注释，附来源链接。查不清的标"未核实"，按最保守的方式实现。
+-- [ ] **Step 2: 写失败测试**。假网关 `tests/fakes/video-server.ts` 要能记录收到的请求，能配置成返回成功、失败或欠费，也能单独运行（`node tests/fakes/video-server.ts --port <n> --video <mp4>`，Task 9 要用）。测试项：
+-  - `checkGates` 的 7 项，各自单独不满足时返回对应原因；全部满足时返回 `[]`。
+-  - `rejects files changed after review`：审核后往 `prompt-v1.txt` 追加一个字 → 被拒；审核后新增 `prompt-v2.txt` → 也被拒。
+-  - `rejects quote already submitted`：Q1 提交成功后再提交一次 → 退出 1，假网关只收到第一次的请求，`spend.jsonl` 行数不变。
+-  - `stops batch on arrears`：报价 3 镜，第 2 个请求返回欠费 → 退出 4，`spend.jsonl` 只有 1 行，假网关只收到 2 个请求。
+-  - 请求头是 `Authorization: Bearer <SEEDANCE_API_KEY>`；stdout 和 stderr 里都不出现 Key 原文。
+-  - `poll`：有任务在跑时退出 10。
+-  - `wait`：假网关第 3 次查询返回成功 → 下载出 `clip-v1.mp4`，退出 0；`--timeout 1` 时退出 6。
+-  - 重拍后得到 `clip-v2.mp4`，`clip-v1.mp4` 还在。
+-  - `tests/quote.test.ts` 按新单价改期望值：两镜各 4.4 秒用 mini → `1.5`，用 2.5 → `5.5`。
+-- [ ] **Step 3:** `node --test tests/seedance.test.ts tests/quote.test.ts`，预期 FAIL。
+-- [ ] **Step 4:** 实现。
+-- [ ] **Step 5:** 预期 PASS，`npm test` 全部通过。
+-- [ ] **Step 6:** 提交 `feat: Seedance 第三方网关与花钱闸门`。
+-
+-### Task 6: Codex 画图
+-
+-**Files:**
+-- Create: `scripts/codex-image.ts`、`tests/fakes/codex.ts`
+-- Test: `tests/codex-image.test.ts`
+-
+-**Interfaces:**
+-- Consumes: `readState`、`isApproved`、`resolveCommand`、`run`、`nextVersionPath`、`writeNew`
+-- Produces: `codex-image.ts <片名> --kind style|sheet|first|last --out <相对片子目录的基名> --prompt <提示词文件> [--ref <图>]...`
+-  - 闸门：G1 未批准 → 任何 `kind` 都拒绝，输出 `故事还没确认，不画图`；G3 未批准 → 只允许 `style`，输出 `画风还没确认，只能画样帧`；G3b 未批准 → 不允许 `first|last`，输出 `设定图还没确认`。被拒退出 1。
+-  - 提示词文件内容前面自动加上 Global Constraints 里的固定开头（文件里已有就不重复加）。
+-  - 运行 `resolveCommand("FILM_CODEX_CMD", ["codex"])` + `exec --skip-git-repo-check -s read-only` + 每个 `-i <ref>` + `-`，提示词走 stdin。
+-  - 从输出里用 `/session id:\s*([0-9a-f-]{8,})/i` 取 session id，在 `<FILM_CODEX_IMAGES>/<id>/` 找本次新出现的图片；取不到 id 时退而找出图目录下启动之后修改过的最新图片。没有图片就退出 3，输出 `Codex 没有出图`；输出里有额度相关字样（`quota`、`rate limit`、`额度`）时退出 5，输出 `Codex 额度用完`。
+-  - 结果复制到 `nextVersionPath(dir, base, "png")`，打印相对路径和图片宽高。宽高比与 16:9 相差超过 1% 时追加一句 `比例不是 16:9，提交视频前要裁切`。
+-
+-- [ ] **Step 1:** 手动跑一次真 codex 画一张小图，确认 0.77 版输出里 session id 的格式和出图目录。按实际情况调整正则；把一段脱敏的真实输出存成 `tests/fakes/codex-output.txt` 供假程序使用。
+-- [ ] **Step 2: 写失败测试**：三种闸门各自拒绝、且不调用 codex（假程序写的日志为空）；正常出图得到 `style/look-v1.png`，再画一次得到 `-v2`；参考图按顺序以 `-i` 传入；假程序输出额度报错时退出 5；1024×1024 的图会打印 `比例不是 16:9`。
+-- [ ] **Step 3:** `node --test tests/codex-image.test.ts`，预期 FAIL。
+-- [ ] **Step 4:** 实现。宽高从 PNG 文件头读（IHDR），不引入依赖。
+-- [ ] **Step 5:** 预期 PASS。
+-- [ ] **Step 6:** 提交 `feat: Codex 画图与阶段闸门`。
+-
+-### Task 7: Python 图像与后期工具
+-
+-**Files:**
+-- Create: `requirements.txt`（`Pillow`）、`scripts/py/sketch.py`、`grayscale.py`、`frames.py`、`post.py`
+-- Test: `tests/py/test_sketch.py`、`test_grayscale.py`、`test_frames.py`、`test_post.py`
+-
+-**Interfaces:**
+-- Produces（全部只新建文件，输出路径由调用方给，已存在则报错退出）：
+-  - `sketch.py <分镜JSON> <输出png>`：分镜 JSON 是 `[{ "shot":"S01", "blocks":[{"x":0.62,"y":0.4,"w":0.1,"h":0.5,"color":"#c0392b","label":"邮差"}], "bg":"#1d2a3a" }]`，坐标为画面比例。每镜画 1920×1080：背景色、色块、标签，在 x=38% 和 62% 画竖线；拼成每行 3 张的总表（缩放到每张 640×360，镜头号写在左上角）。
+-  - `grayscale.py <输入png> <输出png> [--min-contrast 0.25]`：转灰度存图；对 sketch 的每个色块计算块内与周围背景的亮度差（0–1），低于阈值的列出，以退出码 1 表示"明暗对比不够"。分镜 JSON 用 `--board` 传入。
+-  - `frames.py extract <视频> <输出目录> [--every 0.5] [--around 2.0,5.0 --n 3]`：用 ffmpeg 抽帧；`--around` 在给定时间点前后各取 n 帧。`frames.py crop169 <输入png> <输出png>`：居中裁成 16:9。`frames.py compare <首帧> <尾帧> <输出png>`：50% 叠加图 + 差值图并排，打印差异最大的 5 个区域（按 8×8 网格）。
+-  - `post.py concat <清单txt> <输出mp4>`：按清单顺序拼接，解码按 BT.601（`-colorspace bt470bg` 输入解释），中间文件用 FFV1 无损 mkv，最终用 `scale=1920:1080:flags=lanczos,unsharp=5:5:0.3` 放大，输出 H.264 并标 `-colorspace bt709 -color_primaries bt709 -color_trc bt709`。`post.py grade <输入> <输出> --sat 1.0 --bright 0.0`：只调彩度和亮度（`eq=saturation=..:brightness=..`），不动色相。`post.py trim <输入> <输出> --start s --end s`。
+-- 转场（运动模糊切 8–16 份）和卡点因片而异，不做成固定命令，由导演按 `references/stages/7-post.md` 现写 ffmpeg/Python 代码。
+-
+-- [ ] **Step 1:** 问本人后安装 ffmpeg（`winget install Gyan.FFmpeg`），确认 `ffmpeg -version` 可用；建 `.venv` 并 `.venv/Scripts/python -m pip install -r requirements.txt`。
+-- [ ] **Step 2: 写失败测试**：sketch 输出总表尺寸 1920×360（3 镜时）且 x=38% 处像素是竖线色；grayscale 对"深红块在深蓝背景上"报出该块、退出码 1，对"白块在黑背景上"退出 0；frames 用 ffmpeg 生成 3 秒测试视频（`testsrc`），`--every 0.5` 得到 6 张，`--around 1.5 --n 3` 得到 7 张；crop169 把 1024×1024 裁成 1024×576；post concat 两段 1 秒 720p 视频得到约 2 秒 1920×1080、`color_space=bt709` 的文件（用 ffprobe 断言）；任何命令输出已存在时退出非零且原文件不变。
+-- [ ] **Step 3:** `.venv/Scripts/python -m unittest discover -s tests/py`，预期 FAIL。
+-- [ ] **Step 4:** 实现。
+-- [ ] **Step 5:** 预期 PASS。
+-- [ ] **Step 6:** 提交 `feat: 图像与后期工具`。
+-
+-### Task 8: 导演 Skill（R1：在桌面会话里推进）
+-
+-**Files:**
+-- Create: `.claude/skills/film-director/SKILL.md`
+-- Create: `.claude/skills/film-director/references/stages/0-setup.md` … `8-wrap.md`（共 9 个，文件名同原计划）
+-- Create: `.claude/skills/film-director/references/pitfalls.md`、`seven-part-prompt.md`、`gates.md`
+-- Test: `tests/skill.test.ts`
+-
+-**内容要求：**
+-- `SKILL.md`：
+-  - frontmatter：`name: film-director`；`description` 写清什么时候用，即本人说"开一支新片 / 做一支短片 / 继续做《片名》"时。
+-  - 身份：总导演，本人只在这个对话里和你沟通。
+-  - 方法论 7 条规矩原文（PDF 第 4 页），总原则"把错误挡在花钱之前"。
+-  - 开新片：`node scripts/new-film.ts <片名> "<想法>" --no-emit`。
+-  - 继续做：读 `state.json`、`requirements.md`，再打开当前阶段的手册。
+-  - 每一步怎么做：
+-    - 只做当前阶段还没做完的部分；
+-    - 到了关口，按 `gates.md` 用 AskUserQuestion 问本人，问题和选项照写；
+-    - 本人的每次回答（包括自由文字）都追加进 `requirements.md`，注明时间和关口编号，并更新 `state.gates`。
+-  - 审核怎么做：
+-    1. 运行 `node scripts/review.ts prepare …`；
+-    2. 用 Agent 工具开一个新的子 agent（`subagent_type: "Explore"`，只读），prompt 只写 `读这个文件并照做：<prompt.md 绝对路径>`，不附任何对话内容和结论；
+-    3. 把子 agent 的最后回复原文存成 `reviews/…-v<n>.reply.md`；
+-    4. 运行 `node scripts/review.ts record …`。
+-  - 等出片：用 Bash 的 `run_in_background` 运行 `node scripts/seedance.ts wait <片名>`，等完成通知，不要手动反复查。
+-  - 命令速查：每条命令一行，写明各退出码的含义。
+-  - 出错处理（spec §9）：
+-    - `codex-image.ts` 退出 5（额度用完）→ 告诉本人，停止画图，等本人说继续；
+-    - 同一项审核连续 3 次"不通过" → 问本人怎么改；
+-    - Seedance 任务失败 → 读原因：参数问题改完重新报价；临时错误先确认那次失败没扣费，确认没扣才重试一次，否则重新报价；
+-    - 比例不对用 `frames.py crop169` 裁切，不重画。
+-  - 硬性禁止：
+-    - 不手动调用视频接口，只能经过 `seedance.ts`；
+-    - 不手写或改动 `spend.jsonl`、`approvals/`、`reviews/*.json`；
+-    - `approve.ts` 只在本人这一轮的回答里明确选了"批准 Q<n>"之后才运行，`--said` 填本人回答的原文；
+-    - 不覆盖、不删除文件；
+-    - 不打印 `SEEDANCE_API_KEY`；
+-    - 不充值、不买额度；
+-    - 没看过动态、没听过声音的东西要明说。
+-- 9 个阶段文件：要求同原 Task 8，写清每个阶段做什么、产物文件名、要调的审核和命令、完成后 `state` 怎么改。与原 Task 8 不同的地方：
+-  - 关口一律引用 `gates.md`；
+-  - 0-setup：检查 `SEEDANCE_API_KEY` 有没有设（只输出"有"或"没有"），不再检查 `ARK_API_KEY`；
+-  - 5-prompts：报价后问 G4，本人选了"批准"才运行 `approve.ts`，再运行 `seedance.ts submit`；
+-  - 6-generate：用 `wait` 代替 `later`；退出 4（欠费）→ 粗剪已有片段，告诉本人，停下。
+-- `gates.md`：G0–G6 每个关口一节，写清：
+-  - 问题原文和选项原文。G4 的选项固定为 `批准 Q<n>（¥合计）`、`改用 2.5 重新报价`、`先不拍`；2.5 不支持首尾帧时，不出现第二项；
+-  - 要附带的文件路径；
+-  - 选完之后做什么。
+-  - G5 必须写明"我没看过动态、没听过声音"。
+-- `pitfalls.md`、`seven-part-prompt.md`：要求同原 Task 8。易错表的原图是 `.superpowers/sdd/2026-11-07-ai-film-autoloop/pitfalls-table.png`，右栏被截断，补全的文字标 `〔补〕`。
+-
+-- [ ] **Step 1: 写失败测试** `tests/skill.test.ts`，断言：
+-  - `SKILL.md` 有 frontmatter，且 `name: film-director`；
+-  - `SKILL.md` 里提到的每个 `references/...` 路径都存在；
+-  - `stages/` 下恰好 9 个文件；
+-  - G0、G1、G2、G3、G3b、G4、G5、G6 在 `gates.md` 里各有一节；
+-  - `gates.md` 里出现 `批准 Q`，与 `approve.ts` 的匹配规则一致；
+-  - 各阶段文件里出现的产物文件模式与 `config/reviews.json` 一致；
+-  - 所有文本里都不出现 `SEEDANCE_API_KEY=`、`ARK_API_KEY`、`agent-autoloop`。
+-- [ ] **Step 2:** `node --test tests/skill.test.ts`，预期 FAIL。
+-- [ ] **Step 3:** 写全部 Skill 文件。
+-- [ ] **Step 4:** 预期 PASS。
+-- [ ] **Step 5:** 提交 `feat: 导演 Skill 与方法论参考资料`。
+-
+-### Task 9: 启用说明与不花钱的整流程试跑（R1）
+-
+-**Files:**
+-- Create: `README.md`
+-
+-- [ ] **Step 1:** 写 `README.md`，包括：
+-  - 系统是什么（一段话）；
+-  - 前置条件：Claude 桌面端、Codex 已登录、ffmpeg、`.venv`、`SEEDANCE_API_KEY` 和 `SEEDANCE_BASE_URL`；
+-  - 开一支新片：在桌面端新开 Code 会话，目录选本项目，说"开一支新片：……"；
+-  - 怎么继续做一支片子；
+-  - 进展看哪里：片子目录和 `state.json`；
+-  - 花钱规则；
+-  - 常见问题：Codex 额度用完、欠费、会话关了怎么接着做；
+-  - 可选的后台模式：`scripts/bin/claude-official.*` 和 agent-autoloop，注明"未启用"。
+-- [ ] **Step 2:** 不花钱的整流程试跑：主控会话在本会话里照 Skill 执行，本人回答关口。
+-  - 启动假网关：`node tests/fakes/video-server.ts --port 3399 --video <用 ffmpeg testsrc 生成的 5 秒 720p 视频>`；
+-  - 设 `SEEDANCE_BASE_URL=http://127.0.0.1:3399`、`SEEDANCE_API_KEY=test`；
+-  - 开片 `试跑`：想法是"一只橘猫在窗台上看雨，雨停后跳下窗台"，5 秒，1 个镜头；
+-  - 预期得到 `films/试跑/out/final-v1.mp4`（1920×1080、BT.709）和 `lessons.md`，`spend.jsonl` 里有 1 行；
+-  - 这一步会用到真实的 Codex 额度，不花视频网关的钱。每发现一个问题都记下来，回到对应 Task 去修。
+-- [ ] **Step 3:** 提交 `docs: 启用说明`。
+-
+-### Task 10: 真实冒烟（花真钱，按网关价约 ¥1）
+-
+-- [ ] **Step 1:** 先问本人两件事：`SEEDANCE_API_KEY` 和 `SEEDANCE_BASE_URL` 设好了没有；同不同意用 `seedance-2.0-mini` 跑一支 5 秒的片子，约 ¥1（5 秒 × ¥0.15）。不同意就停在 Task 9。
+-- [ ] **Step 2:** 用真网关走完全流程，G4 由本人亲自批准。
+-- [ ] **Step 3:** 核对：
+-  - `spend.jsonl` 的金额与网关后台账单一致；
+-  - 成片 1920×1080、标 BT.709（用 `ffprobe` 查）；
+-  - G5 的问题里写明了"没看过动态、没听过声音"。
+-  - 把实际花费和发现的问题写进 `films/冒烟/lessons.md`；单价有出入就修正 `config/pricing.json`。
+-- [ ] **Step 4:** 提交 `chore: 真实冒烟修正`。
++# AI 短片制作系统 实施计划
++
++> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
++
++**Goal:** 把方法论落成 agent-autoloop 的场景模板：一条导演规则 + 导演 Skill + 一组带闸门的脚本，本人只靠卡片拍板就能从一句想法做到 1080p 成片。
++
++**Architecture:** agent-autoloop 中台按 `recipe/rules.json` 把 `film.new` 事件派给 Claude Code（导演），导演每轮读 `films/<片名>/state.json` 推进一个阶段，用 `ask` 卡片过关口、用 `later` 等出片。画图、审核、报价、提交视频、后期都是 `scripts/` 里的命令，花钱和阶段规矩在脚本里强制检查。审核是导演这一轮里另起的只读 `claude -p` 进程。
++
++**Tech Stack:** Node 24（直接跑 `.ts`，内置 `node:test`，零 npm 依赖），Python 3.14 + Pillow（项目 `.venv`），ffmpeg，agent-autoloop，Claude Code 2.1.x，Codex CLI 0.77，火山方舟 Seedance API。
++
++**Spec:** `docs/superpowers/specs/2026-11-07-ai-film-autoloop-design.md`（以"修订 R1"一节为准）
++
++## Global Constraints
++
++- 所有产物只新建、不覆盖、不删除；同名产物用 `-v<n>` 递增。唯一例外是 `state.json`（状态文件，原地更新）和追加写的 `spend.jsonl`、`requirements.md`。
++- 默认模型 `seedance-2.0-mini`（网关价 720p ¥0.15/秒）；可选 `seedance-2.5`（¥0.55/秒，首尾帧支持核实前不可用）。单价只放在 `config/pricing.json`。（R1）
++- 计费秒数：片中时长向上取整；若 `取整值 − 片中时长 < 0.5` 再加 1 秒。
++- 视频接口：第三方 new-api 网关 `POST {SEEDANCE_BASE_URL}/v1/videos`，`SEEDANCE_BASE_URL` 默认 `https://newapi.dragon3api.com`；Key 只从环境变量 `SEEDANCE_API_KEY` 读，永不打印、不进日志、不写文件。（R1）
++- Codex 调用：`codex exec --skip-git-repo-check -s read-only -i <参考图> - < <提示词>`，提示词开头固定为 `Use your image generation tool to create exactly ONE image. Do not run shell commands.`
++- 审核：导演会话开的只读子 agent；`review.ts` 只做 prepare/record，不启动模型。（R1）
++- 外部命令可用环境变量覆盖成 JSON 数组（测试用假程序）：`FILM_CODEX_CMD`；Codex 出图目录用 `FILM_CODEX_IMAGES` 覆盖（默认 `~/.codex/generated_images`）。
++- 项目根用 `FILM_ROOT` 覆盖（默认仓库根），测试一律在临时目录里跑。
++- 导演是本人在 Claude 桌面端开的 Code 会话（工作目录 = 本项目），Skill 在 `.claude/skills/film-director/`；agent-autoloop 不参与制作流程。（R1）
++- 事项编号固定为 `film:<片名>`；片名只允许 `[A-Za-z0-9_\-\u4e00-\u9fa5]{1,40}`。
++- 不充值、不买额度；Seedance 返回欠费即停。
++- 测试命令：`node --test tests/`（Node），`.venv/Scripts/python -m unittest discover -s tests/py`（Python）。
++
++## Review Focus
++
++1. **审核后又改了文件**：提示词或首尾帧在 `pre-submit` 审核之后被改过，提交必须被拒绝。由 Task 5 的 `rejects files changed after review` 测试覆盖。
++2. **同一份报价重复提交**：导演在不同轮次里对同一个 `Q<n>` 调了两次 `submit`，第二次必须被拒绝，`spend.jsonl` 里不能多出一行。由 Task 5 的 `rejects quote already submitted` 测试覆盖。
++3. **卡片的回答不是"批准"**：本人选了"先不拍"或写了自由文字，或者卡片属于别的片子（`lane` 不同），都不能算批准。由 Task 4 的三条 `findApproval` 测试覆盖。
++4. **中途欠费**：一批 3 个镜头提交到第 2 个时接口返回欠费。第 1 个的花费要记下，第 2、3 个不提交，命令以非零码退出并输出"欠费"。由 Task 5 的 `stops batch on arrears` 测试覆盖。
++5. **审核输出没有明确结论**：模型最后一行写"基本通过"或者干脆没写，都必须记为"不通过"。由 Task 3 的 `parseVerdict` 测试覆盖。
++
++---
++
++## 文件结构
++
++| 文件 | 职责 |
++|---|---|
++| `package.json` | `"type": "module"`，`scripts.test = "node --test tests/"`，无依赖 |
++| `.gitignore` | `films/`、`.venv/`、`*.env`、`node_modules/` |
++| `config/pricing.json` | 模型 id → 每秒单价、默认模型 |
++| `config/reviews.json` | 每类审核需要的资料文件模式 |
++| `scripts/lib/paths.ts` | 项目根、片子目录、片名校验 |
++| `scripts/lib/versioned.ts` | 取下一个版本路径、只新建写入 |
++| `scripts/lib/hash.ts` | 文件 SHA-256 |
++| `scripts/lib/state.ts` | `state.json` 的类型、读写、关口判断 |
++| `scripts/lib/proc.ts` | 按环境变量覆盖解析外部命令并运行 |
++| `scripts/lib/hub.ts` | 读中台状态、核对卡片批准、发事件 |
++| `scripts/lib/ark.ts` | 方舟接口：建任务、查任务、下载 |
++| `scripts/new-film.ts` | 开新片 |
++| `scripts/quote.ts` | 报价 |
++| `scripts/review.ts` | 隔离审核 |
++| `scripts/seedance.ts` | `submit` / `poll` / `fetch` |
++| `scripts/codex-image.ts` | 画一张图（带阶段闸门） |
++| `scripts/py/sketch.py` `grayscale.py` `frames.py` `post.py` | 色块草图、黑白检查、抽帧/裁切、后期 |
++| `skills/film-director/**` | 导演 Skill 和方法论参考资料 |
++| `recipe/rules.json`、`README.md` | autoloop 规则与启用说明 |
++| `tests/*.test.ts`、`tests/fakes/*`、`tests/py/test_*.py` | 测试与假程序 |
++
++所有 CLI 脚本都遵循同一约定：`export async function main(argv: string[]): Promise<number>` 返回退出码；文件末尾 `if (import.meta.main) process.exit(await main(process.argv.slice(2)))`；面向导演的输出是中文一句话，机器可读结果用 `--json` 输出。测试直接调 `main` 或导出的纯函数。
++
++---
++
++### Task 0: 项目骨架与基础库
++
++**Files:**
++- Create: `package.json`、`.gitignore`、`config/pricing.json`、`scripts/lib/paths.ts`、`scripts/lib/versioned.ts`、`scripts/lib/hash.ts`
++- Test: `tests/lib.test.ts`
++
++**Interfaces:**
++- Produces:
++  - `projectRoot(): string`（`FILM_ROOT` 优先）
++  - `filmDir(film: string): string`；`assertFilmName(film: string): void`（不合法时抛错 `片名不合法：<片名>`）
++  - `nextVersionPath(dir: string, base: string, ext: string): string`，返回 `<dir>/<base>-v<n>.<ext>`，n 为已有最大值 +1，从 1 开始
++  - `writeNew(path: string, data: string | Uint8Array): void`，用 `flag: "wx"`，已存在就抛错
++  - `sha256File(path: string): string`（小写十六进制）
++
++- [ ] **Step 1:** 执行前问本人是否用 git 管理本项目；同意则 `git init` 并在后续每个任务末尾提交，不同意则跳过所有提交步骤。
++- [ ] **Step 2: 写失败测试** `tests/lib.test.ts`：
++  - `nextVersionPath` 在空目录返回 `plan-v1.md`；已有 `plan-v1.md`、`plan-v3.md` 时返回 `plan-v4.md`。
++  - `writeNew` 写已存在的文件抛错，原内容不变。
++  - `assertFilmName("雨夜邮差")` 不抛；`assertFilmName("../x")`、`assertFilmName("")` 抛错。
++  - `sha256File` 对内容 `abc` 返回 `ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad`。
++- [ ] **Step 3:** 运行 `node --test tests/lib.test.ts`，预期 FAIL（模块不存在）。
++- [ ] **Step 4:** 实现上述函数；写 `config/pricing.json`：
++  ```json
++  { "default": "mini",
++    "models": {
++      "mini": { "id": "doubao-seedance-2-0-mini-260615", "cnyPerSecond720p": 0.5 },
++      "2.5":  { "id": "doubao-seedance-2-5-260628",      "cnyPerSecond720p": 1.5 } } }
++  ```
++- [ ] **Step 5:** 运行 `node --test tests/lib.test.ts`，预期 PASS。
++- [ ] **Step 6:** 提交 `chore: 项目骨架与基础库`。
++
++### Task 1: 片子状态与开新片
++
++**Files:**
++- Create: `scripts/lib/state.ts`、`scripts/lib/hub.ts`（只先写 `emitEvent`）、`scripts/new-film.ts`
++- Test: `tests/state.test.ts`、`tests/new-film.test.ts`
++
++**Interfaces:**
++- Consumes: Task 0 全部
++- Produces:
++  ```ts
++  type Stage = "setup"|"story"|"board"|"style"|"keyframes"|"prompts"|"generate"|"post"|"wrap"|"done";
++  type GateId = "G0"|"G1"|"G2"|"G3"|"G3b"|"G4"|"G5"|"G6";
++  type GateState = "pending"|"asked"|"approved"|"rejected";
++  interface Shot { seconds: number; status: string; clip: string | null }
++  interface FilmState {
++    film: string; stage: Stage;
++    settings: { seconds: number|null; aspect: string; budgetCNY: number|null; music: string|null; subtitles: boolean; model: "mini"|"2.5" };
++    gates: Partial<Record<GateId, GateState>>;
++    shots: Record<string, Shot>;   // 键形如 "S01"
++    spentCNY: number;
++  }
++  readState(film: string): FilmState
++  writeState(state: FilmState): void            // 先写 state.json.tmp 再 rename
++  isApproved(state: FilmState, gate: GateId): boolean
++  emitEvent(event: { id: string; type: string; subject: string; summary: string }): Promise<{ event: number }>
++  ```
++  `new-film.ts <片名> "<一句话想法>" [--no-emit]`：建 `films/<片名>/` 及子目录 `story board style shots reviews quotes approvals post out`，写 `brief.md`（想法原文）、`requirements.md`（首行 `# 本人要求`，第一条为想法原文）、`state.json`（`stage: "setup"`，`settings.aspect: "16:9"`，`model: "mini"`，其余为 null/空），然后发事件 `{ id: "film.new:<片名>", type: "film.new", subject: "film:<片名>", summary: <想法前 200 字> }`。
++
++- [ ] **Step 1: 写失败测试**：
++  - `writeState` 再 `readState` 得到同一对象；`isApproved` 对缺失关口返回 false。
++  - `new-film` 带 `--no-emit` 在临时 `FILM_ROOT` 下建出全部目录和三个文件，`state.stage === "setup"`。
++  - 片子目录已存在时 `main` 返回非零，且不改动已有文件。
++  - 不带 `--no-emit` 时，对本地假中台（`node:http` 起在随机端口，`AGENT_AUTOLOOP_URL` 指向它）发出的请求体 `subject === "film:测试片"`、`Authorization: Bearer <AGENT_AUTOLOOP_FILM_KEY>`。
++  - 没设 `AGENT_AUTOLOOP_FILM_KEY` 时目录照建，退出码非零并输出 `没有发出事件：缺少 AGENT_AUTOLOOP_FILM_KEY`。
++- [ ] **Step 2:** `node --test tests/state.test.ts tests/new-film.test.ts`，预期 FAIL。
++- [ ] **Step 3:** 实现。
++- [ ] **Step 4:** 同一命令，预期 PASS。
++- [ ] **Step 5:** 提交 `feat: 片子状态与开新片`。
++
++### Task 2: 报价
++
++**Files:**
++- Create: `scripts/quote.ts`
++- Test: `tests/quote.test.ts`
++
++**Interfaces:**
++- Consumes: `readState`、`nextVersionPath`、`writeNew`、`sha256File`、`config/pricing.json`
++- Produces:
++  ```ts
++  billableSeconds(seconds: number): number
++  interface Quote { id: string; film: string; model: "mini"|"2.5"; modelId: string;
++    shots: { shot: string; seconds: number; billable: number; reviewHash: string }[];
++    totalCNY: number; spentCNY: number; budgetCNY: number; overBudget: boolean; createdAt: string }
++  buildQuote(film: string, shots: string[], model?: "mini"|"2.5"): Quote
++  ```
++  `quote.ts <片名> --shots S01,S02 [--model mini|2.5]` 写 `quotes/Q<n>.json`（n 递增，从 1 开始），打印 `报价 Q<n>：<镜头数> 镜 <秒> 秒 <模型> 约 ¥<合计>（估算，以账单为准）；已花 ¥x，预算余 ¥y`。超预算时 `overBudget: true`，打印以 `超预算` 开头，退出码 2。`reviewHash` 是该镜头最新 `pre-submit` 审核 `.json` 文件的哈希；没有通过的审核时 `buildQuote` 抛错 `S0x 还没有通过提交前审核`。`spentCNY` 取自 `spend.jsonl` 各行 `cny` 之和。
++
++- [ ] **Step 1: 写失败测试**：`billableSeconds(4) === 5`、`(4.4) === 5`、`(4.5) === 6`、`(4.6) === 6`、`(0.3) === 2`；两镜各 4.4 秒用 mini 合计 `5.0`；用 2.5 合计 `15.0`；预算 10、已花 6、报价 5 时 `overBudget === true` 且退出码 2；镜头没有审核时报错信息包含 `还没有通过提交前审核`；连续两次报价得到 `Q1`、`Q2`。
++- [ ] **Step 2:** `node --test tests/quote.test.ts`，预期 FAIL。
++- [ ] **Step 3:** 实现；金额保留 1 位小数（`Math.round(x*10)/10`）。
++- [ ] **Step 4:** 预期 PASS。
++- [ ] **Step 5:** 提交 `feat: 报价`。
++
++### Task 3: 审核的准备与记录（R1）
++
++**Files:**
++- Create: `scripts/review.ts`、`config/reviews.json`、`.claude/skills/film-director/references/reviews/story.md`、`keyframe-plan.md`、`keyframes.md`、`pre-submit.md`、`final.md`
++- Test: `tests/review.test.ts`
++
++**Interfaces:**
++- Consumes: Task 0（`filmDir`、`nextVersionPath`、`writeNew`、`sha256File`）、Task 2 读审核记录的约定
++- Produces:
++  ```ts
++  type ReviewKind = "story"|"keyframe-plan"|"keyframes"|"pre-submit"|"final";
++  parseVerdict(text: string): "pass"|"fail"
++  materialsFor(kind: ReviewKind, film: string, shot?: string): string[]   // 绝对路径，按 config/reviews.json 取每类模式下最新版本
++  interface ReviewRecord { kind: ReviewKind; film: string; shot: string|null; verdict: "pass"|"fail"; at: string; files: Record<string, string> } // 绝对路径 → sha256
++  ```
++  - `review.ts prepare <类型> <片名> [--shot S03]`：
++    - 取下一个编号 n，写 `reviews/<类型>[-<镜头>]-v<n>.prompt.md`；
++    - 内容 = 清单全文 + `\n\n资料（只读这些文件，不要读别的）：\n` + 每行一个绝对路径 + `\n本人要求：` + `requirements.md` 绝对路径 + `\n\n最后一行只写"通过"或"不通过"。`；
++    - 同时写同名 `.prompt.json` = `{ kind, film, shot, n, files: {路径: sha256} }`；
++    - 打印提示词文件路径（`/` 分隔），退出 0；
++    - 资料缺失时退出 3，输出以 `缺少资料：` 开头，不写任何文件；
++    - 提示词里不能出现 `state.json` 或 `reviews/` 下的任何路径。
++  - `review.ts record <片名> --prompt <prompt.md 路径> --reply <回复文件>`：
++    - 读同名 `.prompt.json`，逐个重算哈希，有变化就退出 3，输出 `审核期间文件变了：<相对路径>`；
++    - 否则写 `reviews/<类型>[-<镜头>]-v<n>.md`（回复原文）和 `.json`（`ReviewRecord`，`files` 取自 `.prompt.json`）；
++    - 打印 `审核 <类型>：通过|不通过（reviews/...md）`；通过退出 0，不通过退出 1。
++  - `config/reviews.json` 的模式（相对片子目录，`*` 取最新版本），同原 Task 3：
++    - story → `story/shots-v*.md`
++    - keyframe-plan → `shots/<镜头>/plan-v*.md`、`board/storyboard-v*.md`
++    - keyframes → `shots/<镜头>/first-v*.png`、`last-v*.png`、`style/sheet-*-v*.png`（每个角色取最新）、`shots/<镜头>/plan-v*.md`
++    - pre-submit → `shots/<镜头>/prompt-v*.txt`、`first-v*.png`、`last-v*.png`、`style/sheet-*-v*.png`、`board/storyboard-v*.md`、`board/palette-v*.md`
++    - final → `out/final-v*.mp4` 和 `out/final-v*-frames/` 下的全部图片
++
++- [ ] **Step 1:** 写 5 份清单，内容取方法论原文（`.superpowers/sdd/2026-11-07-ai-film-autoloop/methodology.txt`）：
++  - story = PDF 第 6 页"这是一支短片的逐镜头故事…"清单；
++  - keyframe-plan = 第 10 页"先写首帧画什么、尾帧画什么、中间发生什么"，套用 keyframes 的 8 项；
++  - keyframes = 第 10–11 页 8 项检查；
++  - pre-submit = 第 12–13 页"你是审核，只读不改…"清单；
++  - final = 第 14 页全片复核清单。
++  - 每份开头写：`你是第一次看这些材料的审核，只读不改，不要写或改任何文件。图片要用 Read 打开放大看。`
++  - 每份结尾加一项：`对照本人要求文件，列出被忘掉的要求。`
++- [ ] **Step 2: 写失败测试**：
++  - `parseVerdict`：
++    - `"…\n通过"` → pass；
++    - `"…\n不通过"`、`"…\n基本通过"`、`"通过\n还有一条建议"`、`""` → fail；
++    - 规则：只看去掉空白和 Markdown 加粗后的最后一个非空行，它恰好等于"通过"才算 pass。
++  - `prepare`：写出 `.prompt.md` 和 `.prompt.json`；提示词里列出提示词、首帧、尾帧的绝对路径；不含 `state.json` 或 `reviews/` 路径；缺首帧时退出 3 且不写文件。
++  - `record`：
++    - 回复末行"通过"时退出 0，写出 `.md` 和 `.json`，`.json` 字段与 `ReviewRecord` 一致；
++    - 在 prepare 和 record 之间往提示词文件追加一个字 → 退出 3，输出含 `审核期间文件变了`；
++    - 连续两轮得到 `-v1` 和 `-v2`。
++  - 集成：record 一份 pre-submit 通过之后，Task 2 的 `buildQuote` 能对这个镜头报价，不抛错。
++- [ ] **Step 3:** `node --test tests/review.test.ts`，预期 FAIL。
++- [ ] **Step 4:** 实现。
++- [ ] **Step 5:** 预期 PASS，`npm test` 全部通过。
++- [ ] **Step 6:** 提交 `feat: 审核的准备与记录`。
++
++### Task 4: 批准记录（R1，替代原"中台批准核对"）
++
++**Files:**
++- Create: `scripts/approve.ts`
++- Test: `tests/approve.test.ts`
++
++**Interfaces:**
++- Consumes: Task 0；Task 2 的 `Quote` 和 `quotes/Q<n>.json`
++- Produces：
++  - `approve.ts <片名> Q3 --said "<本人在对话里的原话>"`：
++    - 用 `writeNew` 写 `approvals/Q3.json` = `{ quote: "Q3", totalCNY, model, shots: [...], said, at }`，已存在就报错；
++    - 下面几种情况都退出 1，且不写文件：
++      - 报价不存在 → `报价 Q3 不存在`；
++      - 报价 `overBudget: true` → `报价 Q3 超预算，不能批准`；
++      - `said` 里不含 `批准 Q3` → `本人原话里没有"批准 Q3"`；
++      - 已经批准过 → `报价 Q3 已经批准过`；
++    - 成功时打印 `已记下批准：Q3 ¥<合计>`。
++  - 导出 `readApproval(film: string, quoteId: string): { quote: string; totalCNY: number; said: string; at: string } | null`，给 Task 5 用。
++
++- [ ] **Step 1: 写失败测试**：每种拒绝情况各一条，成功一条；`readApproval` 对不存在的报价返回 null。
++- [ ] **Step 2:** `node --test tests/approve.test.ts`，预期 FAIL。
++- [ ] **Step 3:** 实现。
++- [ ] **Step 4:** 预期 PASS。
++- [ ] **Step 5:** 提交 `feat: 批准记录`。
++
++### Task 5: Seedance（第三方网关）提交、查询、等待、下载（R1）
++
++**Files:**
++- Create: `scripts/lib/video-api.ts`、`scripts/seedance.ts`、`tests/fakes/video-server.ts`
++- Modify: `config/pricing.json`、`tests/quote.test.ts`（期望金额随新单价调整）
++- Test: `tests/seedance.test.ts`
++
++**Interfaces:**
++- Consumes: Task 0–4（`readState`、`writeState`、`Quote`、`ReviewRecord`、`readApproval`、`sha256File`、`nextVersionPath`）
++- Produces:
++  ```ts
++  createTask(req: { model: string; prompt: string; firstFrame: string; lastFrame: string; seconds: number; resolution: "720p" }): Promise<{ id: string }>
++  getTask(id: string): Promise<{ status: "queued"|"running"|"succeeded"|"failed"; videoUrl?: string; error?: string }>
++  downloadVideo(id: string, url: string | undefined, dest: string): Promise<void>
++  class ArrearsError extends Error {}     // 余额或额度不足
++  checkGates(film: string, quoteId: string): string[]   // 空数组 = 通过
++  ```
++- `config/pricing.json` 改为：
++  ```json
++  { "default": "mini",
++    "models": {
++      "mini": { "id": "seedance-2.0-mini", "cnyPerSecond720p": 0.15, "firstLastFrame": true },
++      "2.5":  { "id": "seedance-2.5",      "cnyPerSecond720p": 0.55, "firstLastFrame": false } } }
++  ```
++  `firstLastFrame` 只有在 Step 1 从网关或 new-api 文档确认支持后，才能改成 true。
++- 命令：
++  - `seedance.ts submit <片名> --quote Q3`：
++    - 先调 `checkGates`，有原因就逐条打印，退出 1，不发任何请求；
++    - 通过后逐镜头用最新的 `prompt-v*.txt`、`first-v*.png`、`last-v*.png` 建任务；
++    - 每成功一个，就向 `spend.jsonl` 追加一行 `{"at","quote","shot","task","model","billable","cny"}`，并更新 `state.spentCNY` 和 `state.shots[镜头].status = "generating"`；
++    - 遇到 `ArrearsError` 立即停止，打印 `欠费：已提交 <n> 镜，其余未提交`，退出 4。
++  - `poll <片名>`：查询所有还没下载的任务；全部结束退出 0，还有在跑的退出 10；`--json` 输出数组。
++  - `fetch <片名>`：把成功的视频下载到 `shots/<镜头>/clip-v<n>.mp4`，更新 `state.shots[镜头].clip`；失败的任务打印原因。
++  - `wait <片名> [--interval 30] [--timeout 3600]`：反复 poll 直到全部结束，然后 fetch；结束退出 0，超时退出 6 并输出 `还没出完，稍后再 wait`。导演在后台运行它。
++- `checkGates` 的检查顺序和文案：
++  1. `报价 Q3 不存在` / `报价 Q3 超预算，不能提交`
++  2. `模型 <id> 不支持首尾帧`（pricing 里 `firstLastFrame` 不为 true）
++  3. `S01 的提交前审核不是"通过"`
++  4. `S01 审核后改过文件：<相对路径>`：最新审核记录里的哈希和现在的文件不一致，或者现在最新的提示词、首帧、尾帧已经不是当时审核的那个
++  5. `报价 Q3 还没有本人批准`：`readApproval` 返回 null，或批准记录的 `totalCNY` 和报价对不上
++  6. `花费会超预算：已花 ¥x + 本次 ¥y > 预算 ¥z`
++  7. `报价 Q3 已经提交过`：`spend.jsonl` 里已有 `quote === "Q3"` 的行
++- 环境变量：
++  - `SEEDANCE_BASE_URL`：默认 `https://newapi.dragon3api.com`；
++  - `SEEDANCE_API_KEY`：没设就退出 1，输出 `没有设置 SEEDANCE_API_KEY`；
++  - Key 永远不出现在任何输出、日志或文件里。
++
++- [ ] **Step 1:** 核实网关接口，**不发任何会扣费的请求**。
++  - 资料：
++    - `.superpowers/sdd/2026-11-07-ai-film-autoloop/gateway-notes.md` 和 `gateway-pricing.json`；
++    - new-api 官方文档和源码（https://github.com/QuantumNous/new-api，视频任务的 relay 部分，以及豆包/Seedance 适配器）；
++    - 网关首页公开的文档页（如果有）。
++  - 要查清：
++    - `POST /v1/videos` 的请求格式：JSON 还是 multipart；模型、提示词、时长 `seconds`、分辨率怎么写；首帧和尾帧怎么传（base64 data URL 还是网址，用什么字段名）；
++    - 查询接口和下载接口；
++    - 余额或额度不足时返回的 HTTP 状态码和错误文案；
++    - 允许的时长范围，据此修正 Task 2 里 `billableSeconds` 的 2 秒下限；
++    - `seedance-2.5` 是否支持首尾帧。
++  - 结论写进 `scripts/lib/video-api.ts` 顶部注释，附来源链接。查不清的标"未核实"，按最保守的方式实现。
++- [ ] **Step 2: 写失败测试**。假网关 `tests/fakes/video-server.ts` 要能记录收到的请求，能配置成返回成功、失败或欠费，也能单独运行（`node tests/fakes/video-server.ts --port <n> --video <mp4>`，Task 9 要用）。测试项：
++  - `checkGates` 的 7 项，各自单独不满足时返回对应原因；全部满足时返回 `[]`。
++  - `rejects files changed after review`：审核后往 `prompt-v1.txt` 追加一个字 → 被拒；审核后新增 `prompt-v2.txt` → 也被拒。
++  - `rejects quote already submitted`：Q1 提交成功后再提交一次 → 退出 1，假网关只收到第一次的请求，`spend.jsonl` 行数不变。
++  - `stops batch on arrears`：报价 3 镜，第 2 个请求返回欠费 → 退出 4，`spend.jsonl` 只有 1 行，假网关只收到 2 个请求。
++  - 请求头是 `Authorization: Bearer <SEEDANCE_API_KEY>`；stdout 和 stderr 里都不出现 Key 原文。
++  - `poll`：有任务在跑时退出 10。
++  - `wait`：假网关第 3 次查询返回成功 → 下载出 `clip-v1.mp4`，退出 0；`--timeout 1` 时退出 6。
++  - 重拍后得到 `clip-v2.mp4`，`clip-v1.mp4` 还在。
++  - `tests/quote.test.ts` 按新单价改期望值：两镜各 4.4 秒用 mini → `1.5`，用 2.5 → `5.5`。
++- [ ] **Step 3:** `node --test tests/seedance.test.ts tests/quote.test.ts`，预期 FAIL。
++- [ ] **Step 4:** 实现。
++- [ ] **Step 5:** 预期 PASS，`npm test` 全部通过。
++- [ ] **Step 6:** 提交 `feat: Seedance 第三方网关与花钱闸门`。
++
++### Task 6: Codex 画图
++
++**Files:**
++- Create: `scripts/codex-image.ts`、`tests/fakes/codex.ts`
++- Test: `tests/codex-image.test.ts`
++
++**Interfaces:**
++- Consumes: `readState`、`isApproved`、`resolveCommand`、`run`、`nextVersionPath`、`writeNew`
++- Produces: `codex-image.ts <片名> --kind style|sheet|first|last --out <相对片子目录的基名> --prompt <提示词文件> [--ref <图>]...`
++  - 闸门：G1 未批准 → 任何 `kind` 都拒绝，输出 `故事还没确认，不画图`；G3 未批准 → 只允许 `style`，输出 `画风还没确认，只能画样帧`；G3b 未批准 → 不允许 `first|last`，输出 `设定图还没确认`。被拒退出 1。
++  - 提示词文件内容前面自动加上 Global Constraints 里的固定开头（文件里已有就不重复加）。
++  - 运行 `resolveCommand("FILM_CODEX_CMD", ["codex"])` + `exec --skip-git-repo-check -s read-only` + 每个 `-i <ref>` + `-`，提示词走 stdin。
++  - 从输出里用 `/session id:\s*([0-9a-f-]{8,})/i` 取 session id，在 `<FILM_CODEX_IMAGES>/<id>/` 找本次新出现的图片；取不到 id 时退而找出图目录下启动之后修改过的最新图片。没有图片就退出 3，输出 `Codex 没有出图`；输出里有额度相关字样（`quota`、`rate limit`、`额度`）时退出 5，输出 `Codex 额度用完`。
++  - 结果复制到 `nextVersionPath(dir, base, "png")`，打印相对路径和图片宽高。宽高比与 16:9 相差超过 1% 时追加一句 `比例不是 16:9，提交视频前要裁切`。
++
++- [ ] **Step 1:** 手动跑一次真 codex 画一张小图，确认 0.77 版输出里 session id 的格式和出图目录。按实际情况调整正则；把一段脱敏的真实输出存成 `tests/fakes/codex-output.txt` 供假程序使用。
++- [ ] **Step 2: 写失败测试**：三种闸门各自拒绝、且不调用 codex（假程序写的日志为空）；正常出图得到 `style/look-v1.png`，再画一次得到 `-v2`；参考图按顺序以 `-i` 传入；假程序输出额度报错时退出 5；1024×1024 的图会打印 `比例不是 16:9`。
++- [ ] **Step 3:** `node --test tests/codex-image.test.ts`，预期 FAIL。
++- [ ] **Step 4:** 实现。宽高从 PNG 文件头读（IHDR），不引入依赖。
++- [ ] **Step 5:** 预期 PASS。
++- [ ] **Step 6:** 提交 `feat: Codex 画图与阶段闸门`。
++
++### Task 7: Python 图像与后期工具
++
++**Files:**
++- Create: `requirements.txt`（`Pillow`）、`scripts/py/sketch.py`、`grayscale.py`、`frames.py`、`post.py`
++- Test: `tests/py/test_sketch.py`、`test_grayscale.py`、`test_frames.py`、`test_post.py`
++
++**Interfaces:**
++- Produces（全部只新建文件，输出路径由调用方给，已存在则报错退出）：
++  - `sketch.py <分镜JSON> <输出png>`：分镜 JSON 是 `[{ "shot":"S01", "blocks":[{"x":0.62,"y":0.4,"w":0.1,"h":0.5,"color":"#c0392b","label":"邮差"}], "bg":"#1d2a3a" }]`，坐标为画面比例。每镜画 1920×1080：背景色、色块、标签，在 x=38% 和 62% 画竖线；拼成每行 3 张的总表（缩放到每张 640×360，镜头号写在左上角）。
++  - `grayscale.py <输入png> <输出png> [--min-contrast 0.25]`：转灰度存图；对 sketch 的每个色块计算块内与周围背景的亮度差（0–1），低于阈值的列出，以退出码 1 表示"明暗对比不够"。分镜 JSON 用 `--board` 传入。
++  - `frames.py extract <视频> <输出目录> [--every 0.5] [--around 2.0,5.0 --n 3]`：用 ffmpeg 抽帧；`--around` 在给定时间点前后各取 n 帧。`frames.py crop169 <输入png> <输出png>`：居中裁成 16:9。`frames.py compare <首帧> <尾帧> <输出png>`：50% 叠加图 + 差值图并排，打印差异最大的 5 个区域（按 8×8 网格）。
++  - `post.py concat <清单txt> <输出mp4>`：按清单顺序拼接，解码按 BT.601（`-colorspace bt470bg` 输入解释），中间文件用 FFV1 无损 mkv，最终用 `scale=1920:1080:flags=lanczos,unsharp=5:5:0.3` 放大，输出 H.264 并标 `-colorspace bt709 -color_primaries bt709 -color_trc bt709`。`post.py grade <输入> <输出> --sat 1.0 --bright 0.0`：只调彩度和亮度（`eq=saturation=..:brightness=..`），不动色相。`post.py trim <输入> <输出> --start s --end s`。
++- 转场（运动模糊切 8–16 份）和卡点因片而异，不做成固定命令，由导演按 `references/stages/7-post.md` 现写 ffmpeg/Python 代码。
++
++- [ ] **Step 1:** 问本人后安装 ffmpeg（`winget install Gyan.FFmpeg`），确认 `ffmpeg -version` 可用；建 `.venv` 并 `.venv/Scripts/python -m pip install -r requirements.txt`。
++- [ ] **Step 2: 写失败测试**：sketch 输出总表尺寸 1920×360（3 镜时）且 x=38% 处像素是竖线色；grayscale 对"深红块在深蓝背景上"报出该块、退出码 1，对"白块在黑背景上"退出 0；frames 用 ffmpeg 生成 3 秒测试视频（`testsrc`），`--every 0.5` 得到 6 张，`--around 1.5 --n 3` 得到 7 张；crop169 把 1024×1024 裁成 1024×576；post concat 两段 1 秒 720p 视频得到约 2 秒 1920×1080、`color_space=bt709` 的文件（用 ffprobe 断言）；任何命令输出已存在时退出非零且原文件不变。
++- [ ] **Step 3:** `.venv/Scripts/python -m unittest discover -s tests/py`，预期 FAIL。
++- [ ] **Step 4:** 实现。
++- [ ] **Step 5:** 预期 PASS。
++- [ ] **Step 6:** 提交 `feat: 图像与后期工具`。
++
++### Task 8: 导演 Skill（R1：在桌面会话里推进）
++
++**Files:**
++- Create: `.claude/skills/film-director/SKILL.md`
++- Create: `.claude/skills/film-director/references/stages/0-setup.md` … `8-wrap.md`（共 9 个，文件名同原计划）
++- Create: `.claude/skills/film-director/references/pitfalls.md`、`seven-part-prompt.md`、`gates.md`
++- Test: `tests/skill.test.ts`
++
++**内容要求：**
++- `SKILL.md`：
++  - frontmatter：`name: film-director`；`description` 写清什么时候用，即本人说"开一支新片 / 做一支短片 / 继续做《片名》"时。
++  - 身份：总导演，本人只在这个对话里和你沟通。
++  - 方法论 7 条规矩原文（PDF 第 4 页），总原则"把错误挡在花钱之前"。
++  - 开新片：`node scripts/new-film.ts <片名> "<想法>" --no-emit`。
++  - 继续做：读 `state.json`、`requirements.md`，再打开当前阶段的手册。
++  - 每一步怎么做：
++    - 只做当前阶段还没做完的部分；
++    - 到了关口，按 `gates.md` 用 AskUserQuestion 问本人，问题和选项照写；
++    - 本人的每次回答（包括自由文字）都追加进 `requirements.md`，注明时间和关口编号，并更新 `state.gates`。
++  - 审核怎么做：
++    1. 运行 `node scripts/review.ts prepare …`；
++    2. 用 Agent 工具开一个新的子 agent（`subagent_type: "Explore"`，只读），prompt 只写 `读这个文件并照做：<prompt.md 绝对路径>`，不附任何对话内容和结论；
++    3. 把子 agent 的最后回复原文存成 `reviews/…-v<n>.reply.md`；
++    4. 运行 `node scripts/review.ts record …`。
++  - 等出片：用 Bash 的 `run_in_background` 运行 `node scripts/seedance.ts wait <片名>`，等完成通知，不要手动反复查。
++  - 命令速查：每条命令一行，写明各退出码的含义。
++  - 出错处理（spec §9）：
++    - `codex-image.ts` 退出 5（额度用完）→ 告诉本人，停止画图，等本人说继续；
++    - 同一项审核连续 3 次"不通过" → 问本人怎么改；
++    - Seedance 任务失败 → 读原因：参数问题改完重新报价；临时错误先确认那次失败没扣费，确认没扣才重试一次，否则重新报价；
++    - 比例不对用 `frames.py crop169` 裁切，不重画。
++  - 硬性禁止：
++    - 不手动调用视频接口，只能经过 `seedance.ts`；
++    - 不手写或改动 `spend.jsonl`、`approvals/`、`reviews/*.json`；
++    - `approve.ts` 只在本人这一轮的回答里明确选了"批准 Q<n>"之后才运行，`--said` 填本人回答的原文；
++    - 不覆盖、不删除文件；
++    - 不打印 `SEEDANCE_API_KEY`；
++    - 不充值、不买额度；
++    - 没看过动态、没听过声音的东西要明说。
++- 9 个阶段文件：要求同原 Task 8，写清每个阶段做什么、产物文件名、要调的审核和命令、完成后 `state` 怎么改。与原 Task 8 不同的地方：
++  - 关口一律引用 `gates.md`；
++  - 0-setup：检查 `SEEDANCE_API_KEY` 有没有设（只输出"有"或"没有"），不再检查 `ARK_API_KEY`；
++  - 5-prompts：报价后问 G4，本人选了"批准"才运行 `approve.ts`，再运行 `seedance.ts submit`；
++  - 6-generate：用 `wait` 代替 `later`；退出 4（欠费）→ 粗剪已有片段，告诉本人，停下。
++- `gates.md`：G0–G6 每个关口一节，写清：
++  - 问题原文和选项原文。G4 的选项固定为 `批准 Q<n>（¥合计）`、`改用 2.5 重新报价`、`先不拍`；2.5 不支持首尾帧时，不出现第二项；
++  - 要附带的文件路径；
++  - 选完之后做什么。
++  - G5 必须写明"我没看过动态、没听过声音"。
++- `pitfalls.md`、`seven-part-prompt.md`：要求同原 Task 8。易错表的原图是 `.superpowers/sdd/2026-11-07-ai-film-autoloop/pitfalls-table.png`，右栏被截断，补全的文字标 `〔补〕`。
++
++- [ ] **Step 1: 写失败测试** `tests/skill.test.ts`，断言：
++  - `SKILL.md` 有 frontmatter，且 `name: film-director`；
++  - `SKILL.md` 里提到的每个 `references/...` 路径都存在；
++  - `stages/` 下恰好 9 个文件；
++  - G0、G1、G2、G3、G3b、G4、G5、G6 在 `gates.md` 里各有一节；
++  - `gates.md` 里出现 `批准 Q`，与 `approve.ts` 的匹配规则一致；
++  - 各阶段文件里出现的产物文件模式与 `config/reviews.json` 一致；
++  - 所有文本里都不出现 `SEEDANCE_API_KEY=`、`ARK_API_KEY`、`agent-autoloop`。
++- [ ] **Step 2:** `node --test tests/skill.test.ts`，预期 FAIL。
++- [ ] **Step 3:** 写全部 Skill 文件。
++- [ ] **Step 4:** 预期 PASS。
++- [ ] **Step 5:** 提交 `feat: 导演 Skill 与方法论参考资料`。
++
++### Task 9: 启用说明与不花钱的整流程试跑（R1）
++
++**Files:**
++- Create: `README.md`
++
++- [ ] **Step 1:** 写 `README.md`，包括：
++  - 系统是什么（一段话）；
++  - 前置条件：Claude 桌面端、Codex 已登录、ffmpeg、`.venv`、`SEEDANCE_API_KEY` 和 `SEEDANCE_BASE_URL`；
++  - 开一支新片：在桌面端新开 Code 会话，目录选本项目，说"开一支新片：……"；
++  - 怎么继续做一支片子；
++  - 进展看哪里：片子目录和 `state.json`；
++  - 花钱规则；
++  - 常见问题：Codex 额度用完、欠费、会话关了怎么接着做；
++  - 可选的后台模式：`scripts/bin/claude-official.*` 和 agent-autoloop，注明"未启用"。
++- [ ] **Step 2:** 不花钱的整流程试跑：主控会话在本会话里照 Skill 执行，本人回答关口。
++  - 启动假网关：`node tests/fakes/video-server.ts --port 3399 --video <用 ffmpeg testsrc 生成的 5 秒 720p 视频>`；
++  - 设 `SEEDANCE_BASE_URL=http://127.0.0.1:3399`、`SEEDANCE_API_KEY=test`；
++  - 开片 `试跑`：想法是"一只橘猫在窗台上看雨，雨停后跳下窗台"，5 秒，1 个镜头；
++  - 预期得到 `films/试跑/out/final-v1.mp4`（1920×1080、BT.709）和 `lessons.md`，`spend.jsonl` 里有 1 行；
++  - 这一步会用到真实的 Codex 额度，不花视频网关的钱。每发现一个问题都记下来，回到对应 Task 去修。
++- [ ] **Step 3:** 提交 `docs: 启用说明`。
++
++### Task 10: 真实冒烟（花真钱，按网关价约 ¥1）
++
++- [ ] **Step 1:** 先问本人两件事：`SEEDANCE_API_KEY` 和 `SEEDANCE_BASE_URL` 设好了没有；同不同意用 `seedance-2.0-mini` 跑一支 5 秒的片子，约 ¥1（5 秒 × ¥0.15）。不同意就停在 Task 9。
++- [ ] **Step 2:** 用真网关走完全流程，G4 由本人亲自批准。
++- [ ] **Step 3:** 核对：
++  - `spend.jsonl` 的金额与网关后台账单一致；
++  - 成片 1920×1080、标 BT.709（用 `ffprobe` 查）；
++  - G5 的问题里写明了"没看过动态、没听过声音"。
++  - 把实际花费和发现的问题写进 `films/冒烟/lessons.md`；单价有出入就修正 `config/pricing.json`。
++- [ ] **Step 4:** 提交 `chore: 真实冒烟修正`。
+diff --git a/scripts/approve.ts b/scripts/approve.ts
+index c977eb7..278baa6 100644
+--- a/scripts/approve.ts
++++ b/scripts/approve.ts
+@@ -23,28 +23,35 @@ function assertQuoteId(id: string): void {
+ /** 读文件；不存在返回 null。 */
+ function readOrNull(path: string): string | null {
+   try {
+     return readFileSync(path, "utf8");
+   } catch (err) {
+     if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+     throw err;
+   }
+ }
+ 
++/** 出现任何一个就不算批准：否定、拒绝、撤回、拖延、疑问。 */
++const NOT_APPROVING = ["不", "别", "勿", "没", "未", "拒", "取消", "暂缓", "撤", "等", "再说", "？", "?", "吗"];
++
+ /**
+- * 原话里要有 "批准 Q3"（半角空格），且后面不能紧跟数字（"批准 Q31" 不算 Q3）；
+- * "批准" 前 3 个字以内出现 不/别/勿/没/未 的不算（"不批准"、"先不要批准"、"别急着批准"）。
+- * 宁可错拒（如"不错，批准 Q3"会被拒），不可错收。
++ * 只认两种回答（"批准" 和报价号之间是半角空格）：
++ * 1. 恰好是 G4 选项原文 `批准 Q3（¥1.5）`（允许首尾空白）；
++ * 2. 以 `批准 Q3` 开头（后面不能紧跟数字，"批准 Q31" 不算 Q3），且全文不含 NOT_APPROVING 里的任何字样。
++ * 宁可错拒（如"不错，批准 Q3"会被拒），不可错收。只回一个数字（选项编号）不算批准。
+  */
+ export function saidApproves(said: string, quoteId: string): boolean {
+   assertQuoteId(quoteId);
+-  return new RegExp(`(?<![不别勿没未][^]{0,2})批准 ${quoteId}(?!\\d)`).test(said);
++  if (typeof said !== "string") return false;
++  const s = said.trim();
++  if (new RegExp(`^批准 ${quoteId}（¥[0-9.]+）$`).test(s)) return true;
++  return new RegExp(`^批准 ${quoteId}(?!\\d)`).test(s) && !NOT_APPROVING.some((w) => s.includes(w));
+ }
+ 
+ /** 读 approvals/<报价号>.json；没有批准过返回 null。报价号不合法时抛错。 */
+ export function readApproval(
+   film: string,
+   quoteId: string,
+ ): { quote: string; totalCNY: number; said: string; at: string } | null {
+   assertQuoteId(quoteId);
+   const raw = readOrNull(join(filmDir(film), "approvals", `${quoteId}.json`));
+   if (raw === null) return null;
+diff --git a/scripts/bin/claude-official.cmd b/scripts/bin/claude-official.cmd
+index f31b4b3..92e9520 100644
+--- a/scripts/bin/claude-official.cmd
++++ b/scripts/bin/claude-official.cmd
+@@ -1,2 +1,2 @@
+-@echo off
+-node "%~dp0\claude-official.js" %*
++@echo off
++node "%~dp0\claude-official.js" %*
+diff --git a/scripts/bin/login-official.ps1 b/scripts/bin/login-official.ps1
+index 3dba3f7..c385fa2 100644
+--- a/scripts/bin/login-official.ps1
++++ b/scripts/bin/login-official.ps1
+@@ -1,20 +1,20 @@
+-﻿# 在独立配置目录 ~/.claude-film 里打开官方 Claude Code，用来 /login。不改 ~/.claude 的任何配置。
+-foreach ($name in 'ANTHROPIC_BASE_URL','ANTHROPIC_AUTH_TOKEN','ANTHROPIC_MODEL','ANTHROPIC_SMALL_FAST_MODEL','ANTHROPIC_DEFAULT_HAIKU_MODEL','ANTHROPIC_DEFAULT_SONNET_MODEL','ANTHROPIC_DEFAULT_OPUS_MODEL') {
+-    Remove-Item "Env:$name" -ErrorAction SilentlyContinue
+-}
+-$env:CLAUDE_CONFIG_DIR = Join-Path $env:USERPROFILE '.claude-film'
+-# git bash：已有 CLAUDE_CODE_GIT_BASH_PATH 就保留；否则用 FILM_GIT_BASH；否则由 PATH 里的 git.exe 推出 ..\bin\bash.exe（存在才设置）。与 claude-official.js 相同。
+-if (-not $env:CLAUDE_CODE_GIT_BASH_PATH) {
+-    if ($env:FILM_GIT_BASH) {
+-        $env:CLAUDE_CODE_GIT_BASH_PATH = $env:FILM_GIT_BASH
+-    } else {
+-        $git = Get-Command git.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+-        if ($git) {
+-            $bash = Join-Path (Split-Path (Split-Path $git.Source -Parent) -Parent) 'bin\bash.exe'
+-            if (Test-Path -LiteralPath $bash -PathType Leaf) { $env:CLAUDE_CODE_GIT_BASH_PATH = $bash }
+-        }
+-    }
+-}
+-Write-Host "配置目录：$env:CLAUDE_CONFIG_DIR"
+-Write-Host '打开后输入 /login 用官方账号登录，登录完输入 /exit 退出。'
+-claude
++﻿# 在独立配置目录 ~/.claude-film 里打开官方 Claude Code，用来 /login。不改 ~/.claude 的任何配置。
++foreach ($name in 'ANTHROPIC_BASE_URL','ANTHROPIC_AUTH_TOKEN','ANTHROPIC_MODEL','ANTHROPIC_SMALL_FAST_MODEL','ANTHROPIC_DEFAULT_HAIKU_MODEL','ANTHROPIC_DEFAULT_SONNET_MODEL','ANTHROPIC_DEFAULT_OPUS_MODEL') {
++    Remove-Item "Env:$name" -ErrorAction SilentlyContinue
++}
++$env:CLAUDE_CONFIG_DIR = Join-Path $env:USERPROFILE '.claude-film'
++# git bash：已有 CLAUDE_CODE_GIT_BASH_PATH 就保留；否则用 FILM_GIT_BASH；否则由 PATH 里的 git.exe 推出 ..\bin\bash.exe（存在才设置）。与 claude-official.js 相同。
++if (-not $env:CLAUDE_CODE_GIT_BASH_PATH) {
++    if ($env:FILM_GIT_BASH) {
++        $env:CLAUDE_CODE_GIT_BASH_PATH = $env:FILM_GIT_BASH
++    } else {
++        $git = Get-Command git.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
++        if ($git) {
++            $bash = Join-Path (Split-Path (Split-Path $git.Source -Parent) -Parent) 'bin\bash.exe'
++            if (Test-Path -LiteralPath $bash -PathType Leaf) { $env:CLAUDE_CODE_GIT_BASH_PATH = $bash }
++        }
++    }
++}
++Write-Host "配置目录：$env:CLAUDE_CONFIG_DIR"
++Write-Host '打开后输入 /login 用官方账号登录，登录完输入 /exit 退出。'
++claude
+diff --git a/scripts/lib/video-api.ts b/scripts/lib/video-api.ts
+index f98a340..83042d9 100644
+--- a/scripts/lib/video-api.ts
++++ b/scripts/lib/video-api.ts
+@@ -18,21 +18,22 @@
+  *
+  * 创建 POST /v1/videos，Authorization: Bearer <key>，JSON（也接受 multipart，这里只用 JSON）[C][E][G]：
+  *   { "model": "seedance-2.0-mini", "prompt": "...", "seconds": 5, "resolution": "720p", "aspect_ratio": "16:9",
+  *     "task_mode": "first_last_frame",
+  *     "content": [ {"type":"image_url","role":"first_frame","url":"data:image/png;base64,..."},
+  *                  {"type":"image_url","role":"last_frame", "url":"data:image/png;base64,..."} ] }
+  *   - 首尾帧：[G] 原文要点"首尾帧用 task_mode: first_last_frame，content 中两张图片的角色依次为 first_frame、
+  *     last_frame，每张图仍填写完整 data URL"；url 必须是完整 data URL（不是裸 base64、外部网址或本地路径）。
+  *     单图 input_reference 默认按"参考图"处理，不是首帧——所以不用 input_reference。
+  *   - 时长 seconds（整数秒）：seedance-2.0-mini 4–15 秒，seedance-2.5 4–30 秒 [C][D][E][G]；不传按最短。
+- *     → billableSeconds 下限由 2 改为 4（scripts/quote.ts）。上限未在本地检查：超了网关 400、不建任务不扣费 [E][G]。
++ *     → billableSeconds 下限由 2 改为 4（scripts/quote.ts）。上限写在 config/pricing.json 的 maxSeconds（mini 15、2.5 30），
++ *       quote.ts 报价时检查（超了网关也会 400、不建任务不扣费 [E][G]）。
+  *   - 分辨率 resolution "720p"；比例 aspect_ratio ∈ 16:9 9:16 1:1 4:3 3:4 21:9 [C]。
+  *   - 返回 {"id":"task_xxx","status":"queued",...}，id 是公开任务 ID [E][F]。
+  *   - 规格不符 → 400，不建任务、不扣费 [E][G]。每次 POST 都是新任务、单独计费；幂等键不会合并；
+  *     超时且没拿到 id 时"不要直接重发"，要到任务日志核对 [G]。
+  * 查询 GET /v1/videos/{id}：status ∈ queued / in_progress / completed / failed，失败看 error [F]。
+  * 下载 GET /v1/videos/{id}/content，带同一个 Bearer Key，返回视频二进制 [C][F]。
+  * 计费：费用 = 输出秒数 × 单价（+ 参考视频秒数 × 单价，这里不用参考视频），不足 1 秒按 1 秒计；
+  *   seedance-2.0-mini 720p ¥0.15/秒，首帧/首尾帧同价 ¥0.15/秒；seedance-2.5 720p ¥0.55/秒 [A][G]。
+  *   提交时按上限预扣（2.0 系列 15 秒，2.5 系列 30 秒），完成后按实际结算、退差额；失败全额退回 [G]。
+  *   → 余额要够"上限预扣"才能提交；不够时网关拒绝（不发上游请求）。
+@@ -81,29 +82,34 @@ export interface CreateRequest {
+   prompt: string;
+   firstFrame: string; // 本地图片路径
+   lastFrame: string; // 本地图片路径
+   seconds: number; // 整数秒（计费秒数）
+   resolution: "720p";
+   aspectRatio?: string; // 16:9 等；不在网关支持列表里就不传
+ }
+ 
+ export type TaskStatus = "queued" | "running" | "succeeded" | "failed";
+ 
+-const DEFAULT_BASE = "https://newapi.dragon3api.com";
++export const DEFAULT_BASE = "https://newapi.dragon3api.com";
+ const ASPECTS = ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"];
+ const MIME: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp" };
+ const CREATE_TIMEOUT_MS = 180_000;
+ const QUERY_TIMEOUT_MS = 30_000;
+ const DOWNLOAD_TIMEOUT_MS = 600_000;
+ 
+ export function baseUrl(): string {
+-  return (process.env.SEEDANCE_BASE_URL || DEFAULT_BASE).replace(/\/+$/, "");
++  return normBase(process.env.SEEDANCE_BASE_URL);
++}
++
++/** 网关地址去掉末尾的 /；空值按默认地址（旧的 spend 行没有 baseUrl 字段）。 */
++export function normBase(url: string | null | undefined): string {
++  return (typeof url === "string" && url.trim() ? url.trim() : DEFAULT_BASE).replace(/\/+$/, "");
+ }
+ 
+ /** 读 Key；没设抛 MissingKeyError。Key 只放进请求头，不进任何输出。 */
+ export function apiKey(): string {
+   const key = process.env.SEEDANCE_API_KEY;
+   if (!key || !key.trim()) throw new MissingKeyError();
+   return key.trim();
+ }
+ 
+ /** 把文本里的 Key（原文和 Bearer 形式）换成 ***。所有要打印的网关文本都先过这里。 */
+@@ -200,59 +206,89 @@ export async function createTask(req: CreateRequest): Promise<{ id: string }> {
+       /* 落到下面 */
+     }
+     if (typeof id !== "string" || !id.trim()) throw new GatewayError(`网关回复里没有任务编号（HTTP ${res.status}）`, res.status, true);
+     return { id: id.trim() };
+   }
+   if (isArrears(res.status, text)) throw new ArrearsError(describe(res.status, text));
+   // 4xx：网关明确拒绝，没建任务；5xx：不确定
+   throw new GatewayError(describe(res.status, text), res.status, res.status >= 500);
+ }
+ 
+-/** 查任务。网关状态 queued / in_progress / completed / failed 映射为 queued / running / succeeded / failed；不认识的当 running。 */
++/**
++ * 网关查询状态 → 本地状态（键一律小写）。来源 new-api 源码（2026-11-08 读 main 分支）：
++ *   - relay/relay_task.go videoFetchByIDRespBodyBuilder：GET /v1/videos/{id} 走各 adaptor 的 ConvertToOpenAIVideo，
++ *     顶层 {id, status: queued|in_progress|completed|failed, error:{message}}（与 [F] 一致）；
++ *     其他查询路径返回通用 TaskDto：{code:"success", data:{task_id, status, fail_reason, result_url, ...}}，
++ *     data.status 是 model/task.go 的 NOT_START / SUBMITTED / QUEUED / IN_PROGRESS / FAILURE / SUCCESS / UNKNOWN；
++ *     Gemini/Vertex 实时查询的简化格式是 {code, data:{task_id, status: queued|processing|succeeded|failed, url, error}}。
++ *   - 任务不存在：HTTP 400，code "task_not_exist"（不是 404）；查库出错 500。
++ * 所以状态可能在顶层 status，也可能在 data.status；有的上游用 task_status，一并兼容。
++ * UNKNOWN、空值和不认识的状态都不算"还在跑"，按查询出错处理（见 getTask）。
++ */
++const STATUS_MAP: Record<string, TaskStatus> = {
++  queued: "queued",
++  submitted: "queued",
++  not_start: "queued",
++  pending: "queued",
++  in_progress: "running",
++  running: "running",
++  processing: "running",
++  generating: "running",
++  completed: "succeeded",
++  succeeded: "succeeded",
++  success: "succeeded",
++  failed: "failed",
++  failure: "failed",
++  cancelled: "failed",
++  canceled: "failed",
++  expired: "failed",
++};
++
++/** 依次看 status、task_status、data.status、data.task_status，取第一个非空字符串。 */
++function rawStatus(j: any): string {
++  for (const v of [j?.status, j?.task_status, j?.data?.status, j?.data?.task_status]) {
++    if (typeof v === "string" && v.trim()) return v.trim();
++  }
++  return "";
++}
++
++/**
++ * 查任务。状态见 STATUS_MAP（顶层或 data 里都认）。HTTP 出错、回复不是 JSON、没有可识别的状态都抛 GatewayError
++ * （由调用方按"查询出错"计数，不当作还在跑，也不因为一次出错就判失败）。
++ */
+ export async function getTask(id: string): Promise<{ status: TaskStatus; videoUrl?: string; error?: string }> {
+   let res: Response;
+   try {
+     res = await send("GET", `/v1/videos/${encodeURIComponent(id)}`, undefined, QUERY_TIMEOUT_MS);
+   } catch (err) {
+     throw new GatewayError(scrub(`查询失败（${(err as Error).message}）`), null, false);
+   }
+   const text = await res.text();
+   if (!res.ok) throw new GatewayError(`查询失败：${describe(res.status, text)}`, res.status, false);
+   let j: any;
+   try {
+     j = JSON.parse(text);
+   } catch {
+     throw new GatewayError("查询回复不是 JSON", res.status, false);
+   }
+-  const raw = String(j?.status ?? "").toLowerCase();
+-  const map: Record<string, TaskStatus> = {
+-    queued: "queued",
+-    submitted: "queued",
+-    not_start: "queued",
+-    in_progress: "running",
+-    running: "running",
+-    processing: "running",
+-    completed: "succeeded",
+-    succeeded: "succeeded",
+-    success: "succeeded",
+-    failed: "failed",
+-    failure: "failed",
+-    cancelled: "failed",
+-    expired: "failed",
+-  };
+-  const status = map[raw] ?? "running";
++  const raw = rawStatus(j);
++  const status = Object.hasOwn(STATUS_MAP, raw.toLowerCase()) ? STATUS_MAP[raw.toLowerCase()] : undefined;
++  if (!status) {
++    throw new GatewayError(scrub(`查询回复里没有可识别的状态（status：${JSON.stringify(firstChars(raw, 40))}）`), res.status, false);
++  }
++  const d = j?.data && typeof j.data === "object" ? j.data : {};
+   const out: { status: TaskStatus; videoUrl?: string; error?: string } = { status };
+-  const url = j?.video_url ?? j?.url ?? j?.metadata?.url ?? j?.content?.video_url;
++  const url = j?.video_url ?? j?.url ?? j?.metadata?.url ?? j?.content?.video_url ?? d.result_url ?? d.url;
+   if (typeof url === "string" && /^https?:\/\//.test(url)) out.videoUrl = url;
+   if (status === "failed") {
+-    const e = j?.error;
+-    const msg = typeof e === "string" ? e : e?.message ?? j?.fail_reason ?? raw;
++    const e = j?.error ?? d.error;
++    const msg = (typeof e === "string" ? e : e?.message) || j?.fail_reason || d.fail_reason || raw;
+     out.error = scrub(firstChars(String(msg || "失败"), 300));
+   }
+   return out;
+ }
+ 
+ /**
+  * 下载视频到 dest（只写新文件，已存在就报错）。先走 GET /v1/videos/{id}/content（带 Key）；
+  * 失败且有 url 时，再不带 Key 直接下载 url。
+  */
+ export async function downloadVideo(id: string, url: string | undefined, dest: string): Promise<void> {
+diff --git a/scripts/quote.ts b/scripts/quote.ts
+index f83465b..54a5d5f 100644
+--- a/scripts/quote.ts
++++ b/scripts/quote.ts
+@@ -16,33 +16,41 @@ export interface Quote {
+   shots: { shot: string; seconds: number; billable: number; reviewHash: string }[];
+   totalCNY: number;
+   spentCNY: number;
+   budgetCNY: number;
+   overBudget: boolean;
+   createdAt: string;
+ }
+ 
+ export interface Pricing {
+   default: Model;
+-  models: Record<Model, { id: string; cnyPerSecond720p: number; firstLastFrame?: boolean }>;
++  /** maxSeconds：网关单镜最长秒数（mini 15、2.5 30，来源见 scripts/lib/video-api.ts 顶部注释）。 */
++  models: Record<Model, { id: string; cnyPerSecond720p: number; firstLastFrame?: boolean; maxSeconds?: number }>;
+ }
+ 
+-/** spend.jsonl 的一行。submit 写 {at,quote,shot,task,model,billable,cny}；结果不明时 task 为 null 且 uncertain 为 true。 */
++/**
++ * spend.jsonl 的一行。submit 写 {at,quote,shot,task,model,billable,cny,baseUrl}；结果不明时 task 为 null 且 uncertain 为 true。
++ * seedance.ts reconcile 追加核对行 {at,quote,shot,reconcile:"created"|"not-created",task?,note}（文件里没有 cny，读进来按 0）。
++ */
+ export interface SpendRow {
+   at?: string;
+   quote?: string;
+   shot?: string;
+   task?: string | null;
+   model?: string;
+   billable?: number;
+   cny: number;
+   uncertain?: boolean;
++  /** 提交时的网关地址（旧行没有，按默认地址算）。 */
++  baseUrl?: string;
++  reconcile?: "created" | "not-created";
++  note?: string;
+ }
+ 
+ const USAGE = "用法：quote.ts <片名> --shots S01,S02 [--model mini|2.5]";
+ const EPS = 1e-9;
+ 
+ /** 价格表属于代码仓库，按本文件位置定位（与 FILM_ROOT 无关）。 */
+ export function readPricing(): Pricing {
+   const path = resolve(dirname(fileURLToPath(import.meta.url)), "..", "config", "pricing.json");
+   return JSON.parse(readFileSync(path, "utf8")) as Pricing;
+ }
+@@ -56,21 +64,21 @@ function listNames(dir: string): string[] {
+     return readdirSync(dir);
+   } catch (err) {
+     if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+     throw err;
+   }
+ }
+ 
+ /**
+  * 计费秒数：向上取整；余量不足（含等于）0.5 秒再加 1 秒；最少 4 秒。秒数必须是大于 0 的有限数。
+  * 4 秒下限：网关文档写明 seedance-2.0-mini 4–15 秒、seedance-2.5 4–30 秒，seconds 是整数，
+- * 费用 = 输出秒数 × 单价（来源见 scripts/lib/video-api.ts 顶部注释）。上限因模型而异，超了网关返回 400（不建任务、不扣费）。
++ * 费用 = 输出秒数 × 单价（来源见 scripts/lib/video-api.ts 顶部注释）。上限因模型而异（pricing.json 的 maxSeconds），buildQuote 检查。
+  */
+ export function billableSeconds(seconds: number): number {
+   if (typeof seconds !== "number" || !Number.isFinite(seconds) || seconds <= 0) {
+     throw new Error(`秒数不合法：${seconds}`);
+   }
+   let n = Math.ceil(seconds - EPS);
+   if (n - seconds <= 0.5 + EPS) n += 1;
+   return Math.max(n, 4);
+ }
+ 
+@@ -102,56 +110,89 @@ export function readSpendRows(dir: string): SpendRow[] {
+   try {
+     raw = readFileSync(join(dir, "spend.jsonl"), "utf8");
+   } catch (err) {
+     if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
+     throw err;
+   }
+   const rows: SpendRow[] = [];
+   const lines = raw.split(/\r?\n/);
+   for (let i = 0; i < lines.length; i++) {
+     if (!lines[i].trim()) continue;
+-    let row: { cny?: unknown } | null;
++    let row: { cny?: unknown; reconcile?: unknown; quote?: unknown; shot?: unknown; task?: unknown; note?: unknown } | null;
+     try {
+       row = JSON.parse(lines[i]);
+     } catch {
+       throw new Error(`spend.jsonl 第 ${i + 1} 行不是合法的 JSON`);
+     }
++    if (row && typeof row === "object" && Object.hasOwn(row, "reconcile")) {
++      // 核对行：不带钱（cny 只能没有或为 0），必须写明报价、镜头、结论、说明；created 要有任务号
++      const ok =
++        (row.reconcile === "created" || row.reconcile === "not-created") &&
++        typeof row.quote === "string" && typeof row.shot === "string" && typeof row.note === "string" &&
++        (row.reconcile === "not-created" || (typeof row.task === "string" && row.task.length > 0)) &&
++        (row.cny === undefined || row.cny === 0);
++      if (!ok) throw new Error(`spend.jsonl 第 ${i + 1} 行的核对记录不合法`);
++      rows.push({ ...(row as SpendRow), cny: 0 });
++      continue;
++    }
+     const cny = row?.cny;
+     if (typeof cny !== "number" || !Number.isFinite(cny) || cny < 0) {
+       throw new Error(`spend.jsonl 第 ${i + 1} 行的 cny 不合法：${JSON.stringify(cny)}`);
+     }
+     rows.push(row as SpendRow);
+   }
+   return rows;
+ }
+ 
+-/** spend.jsonl 各行 cny 之和（不四舍五入）；文件不存在为 0；坏行抛错。 */
++/**
++ * 已花金额（不四舍五入）：各提交行 cny 之和，减去被核对为"没建成"（reconcile: "not-created"）的那条 uncertain 行。
++ * 核对行本身不算钱；只是不计入某一行，所以不会小于 0。quote.ts、seedance.ts 都只用这个函数算已花。
++ */
++export function spentFromRows(rows: SpendRow[]): number {
++  const key = (r: SpendRow) => JSON.stringify([r.quote, r.shot]);
++  const notCreated = new Set(rows.filter((r) => r.reconcile === "not-created").map(key));
++  let sum = 0;
++  for (const r of rows) {
++    if (r.reconcile !== undefined) continue;
++    if (r.uncertain === true && notCreated.has(key(r))) continue;
++    sum += r.cny;
++  }
++  return sum;
++}
++
++/** spend.jsonl 算出的已花金额（见 spentFromRows）；文件不存在为 0；坏行抛错。 */
+ export function spentFromLog(dir: string): number {
+-  return readSpendRows(dir).reduce((a, r) => a + r.cny, 0);
++  return spentFromRows(readSpendRows(dir));
+ }
+ 
+ function nextQuoteId(dir: string): string {
+   let max = 0;
+   for (const name of listNames(join(dir, "quotes"))) {
+     const m = /^Q(\d+)\.json$/.exec(name);
+     if (m) max = Math.max(max, Number(m[1]));
+   }
+   return `Q${max + 1}`;
+ }
+ 
+ export function buildQuote(film: string, shots: string[], model?: Model): Quote {
+   const dir = filmDir(film);
+   const state = readState(film);
+   const pricing = readPricing();
+   const m: Model = model ?? state.settings.model ?? pricing.default;
+   const price = pricing.models[m];
+   if (!price) throw new Error(`没有这个模型：${m}`);
++  // 本流程每镜都是首尾帧，不支持的模型不报价（提交时闸门 2 还会再查一次）
++  if (price.firstLastFrame !== true) throw new Error(`模型 ${price.id} 不支持首尾帧，不能用于本流程`);
++  const maxSeconds = price.maxSeconds;
++  if (typeof maxSeconds !== "number" || !Number.isInteger(maxSeconds) || maxSeconds < 4) {
++    throw new Error(`价格表里模型 ${price.id} 的单镜上限 maxSeconds 不合法：${JSON.stringify(maxSeconds)}`);
++  }
+   if (shots.length === 0) throw new Error("没有指定镜头");
+   const seen = new Set<string>();
+   for (const s of shots) {
+     if (seen.has(s)) throw new Error(`镜头重复：${s}`);
+     seen.add(s);
+     if (!Object.hasOwn(state.shots, s)) throw new Error(`没有这个镜头：${s}`);
+   }
+   const budget = state.settings.budgetCNY;
+   if (budget === null || budget === undefined) throw new Error("还没有设总预算");
+   if (typeof budget !== "number" || !Number.isFinite(budget) || budget < 0) {
+@@ -159,20 +200,21 @@ export function buildQuote(film: string, shots: string[], model?: Model): Quote
+   }
+ 
+   const lines = shots.map((shot) => {
+     const seconds = state.shots[shot].seconds;
+     let billable: number;
+     try {
+       billable = billableSeconds(seconds);
+     } catch {
+       throw new Error(`${shot} 的秒数不合法：${JSON.stringify(seconds)}`);
+     }
++    if (billable > maxSeconds) throw new Error(`${shot} 计费 ${billable} 秒，超过 ${price.id} 单镜上限 ${maxSeconds} 秒，请拆镜头`);
+     return { shot, seconds, billable, reviewHash: passedReviewHash(dir, shot) };
+   });
+   const rawTotal = lines.reduce((a, l) => a + l.billable, 0) * price.cnyPerSecond720p;
+   if (!Number.isFinite(rawTotal)) throw new Error(`单价不合法：${m}`);
+   const rawSpent = spentFromLog(dir);
+   return {
+     id: nextQuoteId(dir),
+     film,
+     model: m,
+     modelId: price.id,
+diff --git a/scripts/seedance.ts b/scripts/seedance.ts
+index b7dce32..5ac917f 100644
+--- a/scripts/seedance.ts
++++ b/scripts/seedance.ts
+@@ -1,35 +1,47 @@
+ import { appendFileSync, mkdirSync, readFileSync, unlinkSync } from "node:fs";
+ import { join, relative, resolve } from "node:path";
+ import { assertFilmName, filmDir } from "./lib/paths.ts";
+ import { readState, writeState } from "./lib/state.ts";
+ import { latestVersionPath, nextVersionPath, writeNew } from "./lib/versioned.ts";
+ import { sha256File } from "./lib/hash.ts";
+-import { latestReviewPath, readPricing, readSpendRows, round1, spentFromLog, type Quote, type SpendRow } from "./quote.ts";
++import {
++  latestReviewPath,
++  readPricing,
++  readSpendRows,
++  round1,
++  spentFromLog,
++  spentFromRows,
++  type Quote,
++  type SpendRow,
++} from "./quote.ts";
+ import { readApproval } from "./approve.ts";
+ import {
+   apiKey,
+   ArrearsError,
++  baseUrl,
+   createTask,
+   downloadVideo,
+   GatewayError,
+   getTask,
+   MissingKeyError,
++  normBase,
+   scrub,
+   type TaskStatus,
+ } from "./lib/video-api.ts";
+ 
+ const USAGE =
+   "用法：seedance.ts submit <片名> --quote Q<n>\n" +
+   "      seedance.ts poll <片名> [--json]\n" +
+   "      seedance.ts fetch <片名>\n" +
+-  "      seedance.ts wait <片名> [--interval 30] [--timeout 3600]";
++  "      seedance.ts wait <片名> [--interval 30] [--timeout 3600]\n" +
++  '      seedance.ts reconcile <片名> --quote Q<n> --shot S01 (--task <任务号> | --not-created) --note "<本人说明>"';
+ const QUOTE_ID_RE = /^Q\d+$/;
+ const SHOT_RE = /^[A-Za-z0-9_]{1,20}$/;
+ const EPS = 1e-9;
+ const LOCK = ".submit.lock";
+ 
+ /** 提交前审核要和现在一致的三类文件（requirements.md 改了不拦：它是全片要求，不是这一镜的提交内容）。 */
+ const SHOT_FILES = [
+   { base: "prompt", ext: "txt", label: "提示词" },
+   { base: "first", ext: "png", label: "首帧" },
+   { base: "last", ext: "png", label: "尾帧" },
+@@ -168,21 +180,21 @@ export function checkGates(film: string, quoteId: string): string[] {
+ 
+   // 6、7
+   let rows: SpendRow[] | null = null;
+   try {
+     rows = readSpendRows(dir);
+   } catch (err) {
+     g[6].push((err as Error).message);
+   }
+   const budget = state?.settings?.budgetCNY;
+   if (rows) {
+-    const spent = rows.reduce((a, r) => a + r.cny, 0);
++    const spent = spentFromRows(rows);
+     if (!isFiniteNum(budget) || budget < 0) {
+       g[6].push(budget === null || budget === undefined ? "还没有设总预算" : `总预算不合法：${JSON.stringify(budget)}`);
+     } else if (!(spent + rawTotal <= budget + EPS)) {
+       g[6].push(`花费会超预算：已花 ¥${spent.toFixed(1)} + 本次 ¥${q.totalCNY.toFixed(1)} > 预算 ¥${budget.toFixed(1)}`);
+     }
+     if (rows.some((r) => r.quote === quoteId)) g[7].push(`报价 ${quoteId} 已经提交过`);
+   }
+   return g.flat();
+ }
+ 
+@@ -282,26 +294,28 @@ async function submit(args: string[]): Promise<number> {
+   try {
+     const reasons = checkGates(film, quoteId);
+     if (reasons.length > 0) {
+       for (const r of reasons) console.error(r);
+       return 1;
+     }
+     const q = readJson(join(dir, "quotes", `${quoteId}.json`)) as Quote;
+     const price = readPricing().models[q.model];
+     const aspect = readState(film).settings.aspect;
+     const spendPath = join(dir, "spend.jsonl");
++    // 记下提交时的网关地址：之后查询、下载只去同一个网关（换了地址就跳过，不把任务号和 Key 发给别的网关）
++    const gateway = baseUrl();
+     let n = 0;
+     let total = 0;
+     for (const line of q.shots) {
+       const shot = line.shot;
+       const cny = line.billable * price.cnyPerSecond720p;
+-      const base = { quote: quoteId, shot, model: price.id, billable: line.billable, cny };
++      const base = { quote: quoteId, shot, model: price.id, billable: line.billable, cny, baseUrl: gateway };
+ 
+       // 1) 建任务：这里的失败都还没花钱，或者花没花不确定
+       let task: string;
+       try {
+         const prompt = readFileSync(latestShotFile(dir, shot, "prompt", "txt")!, "utf8").trim();
+         task = (
+           await createTask({
+             model: price.id,
+             prompt,
+             firstFrame: latestShotFile(dir, shot, "first", "png")!,
+@@ -325,21 +339,21 @@ async function submit(args: string[]): Promise<number> {
+           } catch (e) {
+             return unrecorded(shot, null, cny, row, e);
+           }
+           try {
+             io.updateShot(film, shot, {}, spentFromLog(dir));
+           } catch (e) {
+             console.error(`警告：spend.jsonl 已记账，但 state.json 没有更新（${scrub((e as Error).message)}）`);
+           }
+           console.error(
+             `${shot} 提交结果不明（${scrub(err.message)}）：可能已经建了任务并扣费，已按 ¥${cny.toFixed(2)} 记入 spend.jsonl。` +
+-              "请到网关的任务日志核对，不要直接重发。",
++              "请到网关的任务日志核对，不要直接重发；查清后由本人决定运行 reconcile 记下结果。",
+           );
+           console.error(`已提交 ${n} 镜，其余未提交`);
+           return 1;
+         }
+         if (err instanceof MissingKeyError) {
+           console.error(err.message);
+           return 1;
+         }
+         const msg = err instanceof GatewayError ? `网关拒绝了（${scrub(err.message)}），没有建任务` : scrub((err as Error).message);
+         console.error(`${shot} 提交失败：${msg}`);
+@@ -405,55 +419,67 @@ function doneTasks(dir: string): Set<string> {
+     try {
+       row = JSON.parse(lines[i]);
+     } catch {
+       throw new Error(`fetched.jsonl 第 ${i + 1} 行不是合法的 JSON`);
+     }
+     if (typeof row?.task === "string") done.add(row.task);
+   }
+   return done;
+ }
+ 
+-/** spend.jsonl 里有任务编号、还没下载或失败结束的任务（按提交顺序，去重）。 */
+-function pendingTasks(dir: string): Pending[] {
++/**
++ * spend.jsonl 里有任务编号、还没下载或失败结束的任务（按提交顺序，去重）。
++ * 提交时的网关地址（行里的 baseUrl，旧行没有按默认地址）和现在的 SEEDANCE_BASE_URL 不同的跳过并说明；
++ * warned 用来让同一个任务在一次 wait 里只说一次。
++ */
++function pendingTasks(dir: string, warned: Set<string> = new Set()): Pending[] {
+   const done = doneTasks(dir);
++  const current = baseUrl();
++  const rows = readSpendRows(dir);
++  // 核对为"建成了"的任务：网关地址取那条结果不明的提交行
++  const uncertainBase = new Map<string, string | undefined>();
++  for (const r of rows) if (r.uncertain === true && r.reconcile === undefined) uncertainBase.set(JSON.stringify([r.quote, r.shot]), r.baseUrl);
+   const out: Pending[] = [];
+   const seen = new Set<string>();
+-  for (const r of readSpendRows(dir)) {
++  for (const r of rows) {
+     if (typeof r.task !== "string" || !r.task || typeof r.shot !== "string") continue;
++    if (r.reconcile !== undefined && r.reconcile !== "created") continue;
+     if (done.has(r.task) || seen.has(r.task)) continue;
+     seen.add(r.task);
++    const at = normBase(r.reconcile === "created" ? uncertainBase.get(JSON.stringify([r.quote, r.shot])) : r.baseUrl);
++    if (at !== current) {
++      if (!warned.has(r.task)) console.error(`${r.shot} 的任务是在 ${at} 提交的，当前网关地址不同，跳过`);
++      warned.add(r.task);
++      continue;
++    }
+     out.push({ shot: r.shot, task: r.task });
+   }
+   return out;
+ }
+ 
+ /** 同一个任务在一次 wait 里连续查询出错这么多次，就当失败结束，不再拖住整片。 */
+ const MAX_QUERY_ERRORS = 5;
+ 
+ /**
+- * 查一遍所有待查任务。查询返回 404/410（网关上没有这个任务）直接算失败；
+- * 传入 errCounts（wait 用）时，同一任务连续出错 MAX_QUERY_ERRORS 次也算失败；其他出错为 unknown（没结束）。
++ * 查一遍所有待查任务。任何查询出错（含 404/410、回复里没有可识别的状态）都是 unknown（没结束），
++ * 单次 poll / fetch 永远不因为出错就判失败——任务可能已经付了钱，一次查不到不代表没有。
++ * 只有传入 errCounts（wait 用）时，同一任务在这次 wait 里连续出错 MAX_QUERY_ERRORS 次才算失败。
+  */
+-async function pollOnce(dir: string, errCounts?: Map<string, number>): Promise<PollResult[]> {
++async function pollOnce(dir: string, errCounts?: Map<string, number>, warned?: Set<string>): Promise<PollResult[]> {
+   const out: PollResult[] = [];
+-  for (const p of pendingTasks(dir)) {
++  for (const p of pendingTasks(dir, warned)) {
+     try {
+       out.push({ ...p, ...(await getTask(p.task)) });
+       errCounts?.delete(p.task);
+     } catch (err) {
+       if (err instanceof MissingKeyError) throw err;
+       const msg = scrub((err as Error).message);
+-      const status = err instanceof GatewayError ? err.status : null;
+-      if (status === 404 || status === 410) {
+-        out.push({ ...p, status: "failed", error: `网关上找不到这个任务（${msg}）` });
+-        continue;
+-      }
+       const n = (errCounts?.get(p.task) ?? 0) + 1;
+       errCounts?.set(p.task, n);
+       if (errCounts && n >= MAX_QUERY_ERRORS) {
+         out.push({ ...p, status: "failed", error: `连续 ${n} 次查询出错（${msg}）` });
+       } else {
+         out.push({ ...p, status: "unknown", error: msg });
+       }
+     }
+   }
+   return out;
+@@ -555,35 +581,120 @@ async function wait(args: string[]): Promise<number> {
+     if (rest[i] === "--interval" && i + 1 < rest.length && Number.isFinite(v) && v >= 0) interval = v, i++;
+     else if (rest[i] === "--timeout" && i + 1 < rest.length && Number.isFinite(v) && v > 0) timeout = v, i++;
+     else return usage();
+   }
+   const film = filmArg(filmRaw);
+   if (!film) return usage();
+   if (!needKey()) return 1;
+   const dir = filmDir(film);
+   const deadline = Date.now() + timeout * 1000;
+   const errCounts = new Map<string, number>();
++  const warned = new Set<string>();
+   for (;;) {
+-    const results = await pollOnce(dir, errCounts);
++    const results = await pollOnce(dir, errCounts, warned);
+     // 全部结束：下载并记录，退出 0（个别镜头生成失败也是 0，原因已打印并写进 fetched.jsonl）
+     if (!unfinished(results)) return fetchAll(film, results);
+     const left = deadline - Date.now();
+     if (left <= 0) {
+       // 超时也先把已经出好的下载下来、把失败的记下
+       await fetchAll(film, results);
+       console.log("还没出完，稍后再 wait");
+       return 6;
+     }
+     await new Promise((ok) => setTimeout(ok, Math.min(interval * 1000, left)));
+   }
+ }
+ 
++const TASK_ID_RE = /^[A-Za-z0-9_.:-]{1,200}$/;
++
++/**
++ * 核对一次"结果不明"的提交（本人到网关后台查清之后，由本人决定执行）。只往 spend.jsonl 追加一行核对记录，不改旧行：
++ *   --task <id>     建成了：之后 poll / fetch / wait 把这个任务当作这一镜的任务去查、去下载（已花金额不变）；
++ *   --not-created   没建成：统计已花金额时不再算那条 uncertain 行（spentFromRows）。
++ * 只有这一镜在这份报价里有 uncertain 行、而且还没核对过时才执行，否则退出 1。不联网，不需要 Key。
++ * 闸门 7 照旧：这份报价不能再提交，要重拍就重新报价。
++ */
++async function reconcile(args: string[]): Promise<number> {
++  const [filmRaw, ...rest] = args;
++  let quoteId: string | undefined;
++  let shot: string | undefined;
++  let task: string | undefined;
++  let notCreated = false;
++  let note: string | undefined;
++  for (let i = 0; i < rest.length; i++) {
++    const has = i + 1 < rest.length;
++    if (rest[i] === "--quote" && has) quoteId = rest[++i];
++    else if (rest[i] === "--shot" && has) shot = rest[++i];
++    else if (rest[i] === "--task" && has) task = rest[++i];
++    else if (rest[i] === "--note" && has) note = rest[++i];
++    else if (rest[i] === "--not-created") notCreated = true;
++    else return usage();
++  }
++  const film = filmArg(filmRaw);
++  if (!film || !quoteId || !QUOTE_ID_RE.test(quoteId) || !shot || !SHOT_RE.test(shot)) return usage();
++  if ((task === undefined) === !notCreated) return usage(); // --task 和 --not-created 恰好给一个
++  if (task !== undefined && !TASK_ID_RE.test(task)) return usage();
++  if (note === undefined || !note.trim()) return usage();
++
++  const dir = filmDir(film);
++  if (readJson(join(dir, LOCK)) !== undefined) {
++    console.error(`另一个提交的锁还在（films/${film}/${LOCK}），先处理它再核对`);
++    return 1;
++  }
++  let rows: SpendRow[];
++  try {
++    rows = readSpendRows(dir);
++  } catch (err) {
++    console.error((err as Error).message);
++    return 1;
++  }
++  const same = (r: SpendRow) => r.quote === quoteId && r.shot === shot;
++  if (!rows.some((r) => same(r) && r.uncertain === true && r.reconcile === undefined)) {
++    console.error(`报价 ${quoteId} 的 ${shot} 没有结果不明（uncertain）的提交记录，不用核对`);
++    return 1;
++  }
++  if (rows.some((r) => same(r) && r.reconcile !== undefined)) {
++    console.error(`报价 ${quoteId} 的 ${shot} 已经核对过，不能再核对`);
++    return 1;
++  }
++  if (task !== undefined && rows.some((r) => r.task === task)) {
++    console.error(`任务 ${task} 已经记在 spend.jsonl 里了`);
++    return 1;
++  }
++  const row = {
++    at: new Date().toISOString(),
++    quote: quoteId,
++    shot,
++    reconcile: notCreated ? "not-created" : "created",
++    ...(task !== undefined ? { task } : {}),
++    note,
++  };
++  try {
++    io.appendJsonl(join(dir, "spend.jsonl"), row);
++  } catch (err) {
++    console.error(`写 spend.jsonl 失败（${scrub((err as Error).message)}），没有记下核对`);
++    return 1;
++  }
++  try {
++    io.updateShot(film, shot, notCreated ? {} : { status: "generating" }, spentFromLog(dir));
++  } catch (err) {
++    console.error(`警告：核对已记入 spend.jsonl，但 state.json 没有更新（${scrub((err as Error).message)}）`);
++  }
++  if (notCreated) {
++    console.log(`已核对：报价 ${quoteId} 的 ${shot} 没有建成任务，已花金额不再算这一镜；要拍就重新报价`);
++  } else {
++    console.log(`已核对：报价 ${quoteId} 的 ${shot} 是任务 ${task}；用 wait 等出片`);
++  }
++  return 0;
++}
++
+ export async function main(argv: string[]): Promise<number> {
+   const [cmd, ...args] = argv;
++  if (cmd === "reconcile") return reconcile(args);
+   if (cmd === "submit") return submit(args);
+   if (cmd === "poll") return poll(args);
+   if (cmd === "fetch") return fetchCmd(args);
+   if (cmd === "wait") return wait(args);
+   return usage();
+ }
+ 
+ if (import.meta.main) process.exit(await main(process.argv.slice(2)));
+diff --git a/tests/approve.test.ts b/tests/approve.test.ts
+index cbac222..5b3469e 100644
+--- a/tests/approve.test.ts
++++ b/tests/approve.test.ts
+@@ -56,21 +56,21 @@ function approvals(dir: string): string[] {
+   try {
+     return readdirSync(join(dir, "approvals"));
+   } catch {
+     return [];
+   }
+ }
+ 
+ test("成功：写 approvals/Q3.json，打印已记下批准，readApproval 能读回", async () => {
+   await withFilm(async (dir, out) => {
+     const q = writeQuote(dir, "Q3");
+-    const said = "好的，批准 Q3，开始生成吧";
++    const said = "批准 Q3，开始生成吧";
+     assert.equal(await main([FILM, "Q3", "--said", said]), 0);
+     assert.equal(out.at(-1), "已记下批准：Q3 ¥5.0");
+     const a = JSON.parse(readFileSync(join(dir, "approvals", "Q3.json"), "utf8"));
+     assert.equal(a.quote, "Q3");
+     assert.equal(a.totalCNY, 5);
+     assert.equal(a.model, "mini");
+     assert.deepEqual(a.shots, q.shots);
+     assert.equal(a.said, said);
+     assert.ok(!Number.isNaN(Date.parse(a.at)));
+     const r = readApproval(FILM, "Q3");
+@@ -113,32 +113,33 @@ test("原话里没有“批准 Q3”：退出 1，不写文件（含全角空格
+ 
+ test("Q3 与 Q31：“批准 Q31” 不能批准 Q3，“批准 Q3” 不能批准 Q31", async () => {
+   await withFilm(async (dir, out) => {
+     writeQuote(dir, "Q3");
+     writeQuote(dir, "Q31");
+     assert.equal(await main([FILM, "Q3", "--said", "批准 Q31"]), 1);
+     assert.equal(out.at(-1), '本人原话里没有"批准 Q3"');
+     assert.equal(await main([FILM, "Q31", "--said", "批准 Q3"]), 1);
+     assert.equal(out.at(-1), '本人原话里没有"批准 Q31"');
+     assert.deepEqual(approvals(dir), []);
+-    assert.equal(await main([FILM, "Q3", "--said", "批准 Q31，也批准 Q3。"]), 0);
++    assert.equal(await main([FILM, "Q3", "--said", "批准 Q31，也批准 Q3。"]), 1);
++    assert.equal(await main([FILM, "Q3", "--said", "批准 Q3"]), 0);
+     assert.equal(await main([FILM, "Q31", "--said", "批准 Q31"]), 0);
+     assert.deepEqual(approvals(dir).sort(), ["Q3.json", "Q31.json"]);
+   });
+ });
+ 
+ test("已经批准过：退出 1，原批准文件不变", async () => {
+   await withFilm(async (dir, out) => {
+     writeQuote(dir, "Q3");
+     assert.equal(await main([FILM, "Q3", "--said", "批准 Q3"]), 0);
+     const before = readFileSync(join(dir, "approvals", "Q3.json"), "utf8");
+-    assert.equal(await main([FILM, "Q3", "--said", "再次批准 Q3"]), 1);
++    assert.equal(await main([FILM, "Q3", "--said", "批准 Q3（¥5）"]), 1);
+     assert.equal(out.at(-1), "报价 Q3 已经批准过");
+     assert.equal(readFileSync(join(dir, "approvals", "Q3.json"), "utf8"), before);
+   });
+ });
+ 
+ test("参数不对：退出 2（报价号格式、缺 --said、多余参数、片名不合法）", async () => {
+   await withFilm(async (dir) => {
+     writeQuote(dir, "Q3");
+     for (const argv of [
+       [FILM, "q3", "--said", "批准 q3"],
+@@ -175,10 +176,43 @@ test("原话里否定了批准：退出 1，不写文件（不批准、别批准
+   });
+ });
+ 
+ test("卡片选项原文“批准 Q3（¥1.5）”可以批准", async () => {
+   await withFilm(async (dir) => {
+     writeQuote(dir, "Q3");
+     assert.equal(await main([FILM, "Q3", "--said", "批准 Q3（¥1.5）"]), 0);
+     assert.deepEqual(approvals(dir), ["Q3.json"]);
+   });
+ });
++
++test("I3：自我否定、疑问、拖延或别的报价号一律拒绝", async () => {
++  await withFilm(async (dir, out) => {
++    writeQuote(dir, "Q3");
++    for (const said of [
++      "拒绝批准 Q3",
++      "取消批准 Q3",
++      "暂缓批准 Q3",
++      "先等等再批准 Q3",
++      "批准 Q3？",
++      "能批准 Q3 吗",
++      "不批准 Q3",
++      "别批准 Q3",
++      "批准 Q31",
++      "批准 Q3 吗",
++      "批准 Q3，不对，先别",
++      "批准 Q3?",
++      "3",
++      "好的，批准 Q3",
++    ]) {
++      assert.equal(await main([FILM, "Q3", "--said", said]), 1, said);
++      assert.equal(out.at(-1), '本人原话里没有"批准 Q3"');
++    }
++    assert.deepEqual(approvals(dir), []);
++  });
++});
++
++test("I3：选项原文（允许首尾空白）和以“批准 Q3”开头的明确回答可以批准", async () => {
++  const { saidApproves } = await import("../scripts/approve.ts");
++  for (const said of ["批准 Q3（¥1.5）", "批准 Q3", "  批准 Q3（¥0.75）  ", "批准 Q3，开始吧"]) {
++    assert.ok(saidApproves(said, "Q3"), said);
++  }
++});
+diff --git a/tests/fakes/video-server.ts b/tests/fakes/video-server.ts
+index 3d69b73..ea8b6a0 100644
+--- a/tests/fakes/video-server.ts
++++ b/tests/fakes/video-server.ts
+@@ -23,20 +23,25 @@ export interface VideoServerOptions {
+   /** 每个任务第几次查询变成 completed（默认 1）。 */
+   succeedAfter?: number;
+   /** 这些任务查询时一直返回 404（任务丢了）。 */
+   vanish?: string[];
+   /** 这些任务查询时一直返回 500。 */
+   queryErrors?: string[];
+   /** 这些任务一直在生成，永远不结束。 */
+   stuck?: string[];
+   /** 任务的最终结果（默认 ok）。 */
+   result?: "ok" | "fail";
++  /** 查询回复的写法：openai（默认，顶层 status）；data（new-api 通用 TaskDto：{code,data:{status:"SUCCESS"…}}）；
++   *  empty（status 是空字符串）。 */
++  queryShape?: "openai" | "data" | "empty";
++  /** 网关上已经有的任务（模拟"提交结果不明、其实建成了"的任务）。 */
++  known?: string[];
+   /** 下载返回的视频内容。 */
+   video?: Uint8Array;
+   port?: number;
+ }
+ 
+ export interface VideoServer {
+   url: string;
+   requests: RecordedRequest[];
+   /** 只看 POST /v1/videos。 */
+   creates(): RecordedRequest[];
+@@ -68,20 +73,21 @@ function checkCreate(body: any): string | null {
+   }
+   return null;
+ }
+ 
+ export async function startVideoServer(options: VideoServerOptions = {}): Promise<VideoServer> {
+   const requests: RecordedRequest[] = [];
+   const tasks = new Map<string, { queries: number }>();
+   let createCount = 0;
+   let seq = 0;
+   const video = options.video ?? new TextEncoder().encode("FAKE-MP4-DATA");
++  for (const id of options.known ?? []) tasks.set(id, { queries: 0 });
+ 
+   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+     const chunks: Buffer[] = [];
+     for await (const ch of req) chunks.push(ch as Buffer);
+     const raw = Buffer.concat(chunks).toString("utf8");
+     let body: unknown = null;
+     if (raw) {
+       try {
+         body = JSON.parse(raw);
+       } catch {
+@@ -126,20 +132,25 @@ export async function startVideoServer(options: VideoServerOptions = {}): Promis
+       const stuck = options.stuck?.includes(id) ?? false;
+       const done = !stuck && t.queries >= (options.succeedAfter ?? 1);
+       if (m[2]) {
+         if (!done || options.result === "fail") return send(res, 400, { error: { message: "video not ready", code: "not_ready" } });
+         res.writeHead(200, { "content-type": "video/mp4" });
+         res.end(video);
+         return;
+       }
+       t.queries++;
+       const finished = !stuck && t.queries >= (options.succeedAfter ?? 1);
++      if (options.queryShape === "empty") return send(res, 200, { id, object: "video", status: "" });
++      if (options.queryShape === "data") {
++        const st = !finished ? (t.queries === 1 ? "QUEUED" : "IN_PROGRESS") : options.result === "fail" ? "FAILURE" : "SUCCESS";
++        return send(res, 200, { code: "success", message: "", data: { task_id: id, status: st, fail_reason: st === "FAILURE" ? "上游失败" : "", progress: "50%" } });
++      }
+       if (!finished) return send(res, 200, { id, object: "video", status: t.queries === 1 ? "queued" : "in_progress", progress: 50 });
+       if (options.result === "fail") {
+         return send(res, 200, { id, object: "video", status: "failed", progress: 100, error: { message: "内容审核未通过", code: "content_policy" } });
+       }
+       return send(res, 200, { id, object: "video", status: "completed", progress: 100 });
+     }
+     send(res, 404, { error: { message: "not found" } });
+   });
+ 
+   await new Promise<void>((ok) => server.listen(options.port ?? 0, "127.0.0.1", ok));
+diff --git a/tests/quote.test.ts b/tests/quote.test.ts
+index 7d2d8cf..fe62f7c 100644
+--- a/tests/quote.test.ts
++++ b/tests/quote.test.ts
+@@ -77,23 +77,20 @@ test("两镜各 4.4 秒：mini 合计 1.5，2.5 合计 5.5；reviewHash 是最
+     review(dir, "S01", 1, "pass");
+     const latest = review(dir, "S01", 2, "pass");
+     review(dir, "S02", 1, "pass");
+     const q = buildQuote(FILM, ["S01", "S02"]);
+     assert.equal(q.model, "mini");
+     assert.equal(q.modelId, "seedance-2.0-mini");
+     assert.equal(q.totalCNY, 1.5);
+     assert.equal(q.overBudget, false);
+     assert.deepEqual(q.shots.map((s) => [s.shot, s.seconds, s.billable]), [["S01", 4.4, 5], ["S02", 4.4, 5]]);
+     assert.equal(q.shots[0].reviewHash, sha256File(latest));
+-    const q25 = buildQuote(FILM, ["S01", "S02"], "2.5");
+-    assert.equal(q25.modelId, "seedance-2.5");
+-    assert.equal(q25.totalCNY, 5.5);
+   });
+ });
+ 
+ test("预算 7、已花 6、报价 1.5：overBudget，打印以超预算开头，退出码 2", async () => {
+   await withFilm({ budget: 7, shots: { S01: 4.4, S02: 4.4 }, spent: [2.5, 3.5] }, async (dir, out) => {
+     review(dir, "S01", 1, "pass");
+     review(dir, "S02", 1, "pass");
+     const q = buildQuote(FILM, ["S01", "S02"]);
+     assert.equal(q.spentCNY, 6);
+     assert.equal(q.budgetCNY, 7);
+@@ -121,27 +118,27 @@ test("镜头没有审核、最新审核不通过时报错", async () => {
+ 
+ test("连续两次报价得到 Q1、Q2，打印报价句子", async () => {
+   await withFilm({ budget: 100, shots: { S01: 4.4, S02: 4.4 }, spent: [1] }, async (dir, out) => {
+     review(dir, "S01", 1, "pass");
+     review(dir, "S02", 1, "pass");
+     assert.equal(await main([FILM, "--shots", "S01,S02"]), 0);
+     assert.equal(
+       out.at(-1),
+       "报价 Q1：2 镜 10 秒 mini 约 ¥1.5（估算，以账单为准）；已花 ¥1.0，预算余 ¥99.0",
+     );
+-    assert.equal(await main([FILM, "--shots", "S01", "--model", "2.5"]), 0);
+-    assert.match(out.at(-1)!, /^报价 Q2：1 镜 5 秒 2\.5 约 ¥2\.8/);
++    assert.equal(await main([FILM, "--shots", "S01"]), 0);
++    assert.match(out.at(-1)!, /^报价 Q2：1 镜 5 秒 mini 约 ¥0\.8/);
+     assert.deepEqual(readdirSync(join(dir, "quotes")).sort(), ["Q1.json", "Q2.json"]);
+     const q2 = JSON.parse(readFileSync(join(dir, "quotes", "Q2.json"), "utf8"));
+     assert.equal(q2.id, "Q2");
+     assert.equal(q2.film, FILM);
+-    assert.equal(q2.model, "2.5");
++    assert.equal(q2.model, "mini");
+   });
+ });
+ 
+ test("没设总预算、未知镜头、缺参数时退出码 2 且不写报价", async () => {
+   await withFilm({ budget: null, shots: { S01: 4 } }, async (dir, out) => {
+     review(dir, "S01", 1, "pass");
+     assert.equal(await main([FILM, "--shots", "S01"]), 2);
+     assert.match(out.at(-1)!, /还没有设总预算/);
+     assert.deepEqual(readdirSync(join(dir, "quotes")), []);
+   });
+@@ -201,10 +198,60 @@ test("预算比较用未四舍五入的已花：已花 6.04 + 报价 1.5 > 预
+     review(dir, "S01", 1, "pass");
+     review(dir, "S02", 1, "pass");
+     const q = buildQuote(FILM, ["S01", "S02"]);
+     assert.equal(q.totalCNY, 1.5);
+     assert.equal(q.spentCNY, 6.0);
+     assert.equal(q.overBudget, true);
+     assert.equal(await main([FILM, "--shots", "S01,S02"]), 2);
+     assert.match(out.at(-1)!, /^超预算/);
+   });
+ });
++
++test("不支持首尾帧的模型（2.5）不报价：退出 2，不写报价", async () => {
++  await withFilm({ budget: 100, shots: { S01: 4.4 } }, async (dir, out) => {
++    review(dir, "S01", 1, "pass");
++    assert.throws(() => buildQuote(FILM, ["S01"], "2.5"), /^Error: 模型 seedance-2\.5 不支持首尾帧，不能用于本流程$/);
++    assert.equal(await main([FILM, "--shots", "S01", "--model", "2.5"]), 2);
++    assert.equal(out.at(-1), "模型 seedance-2.5 不支持首尾帧，不能用于本流程");
++    assert.deepEqual(readdirSync(join(dir, "quotes")), []);
++  });
++});
++
++test("计费秒数超过模型单镜上限（mini 15 秒）：退出 2，不写报价；正好 15 秒可以", async () => {
++  await withFilm({ budget: 100, shots: { S01: 14.6, S02: 14.4 } }, async (dir, out) => {
++    review(dir, "S01", 1, "pass");
++    review(dir, "S02", 1, "pass");
++    assert.equal(await main([FILM, "--shots", "S02,S01"]), 2);
++    assert.equal(out.at(-1), "S01 计费 16 秒，超过 seedance-2.0-mini 单镜上限 15 秒，请拆镜头");
++    assert.deepEqual(readdirSync(join(dir, "quotes")), []);
++    assert.equal(buildQuote(FILM, ["S02"]).shots[0].billable, 15);
++  });
++});
++
++test("I2：spentFromRows 扣掉核对为没建成的 uncertain 行，不会变成负数；核对行本身不算钱", async () => {
++  const { spentFromRows } = await import("../scripts/quote.ts");
++  const rows = [
++    { quote: "Q1", shot: "S01", task: "t1", cny: 0.75 },
++    { quote: "Q2", shot: "S01", task: null, uncertain: true, cny: 0.75 },
++    { quote: "Q2", shot: "S02", task: null, uncertain: true, cny: 1.5 },
++    { quote: "Q2", shot: "S01", reconcile: "not-created", note: "x", cny: 0 },
++    { quote: "Q2", shot: "S02", reconcile: "created", task: "t9", note: "x", cny: 0 },
++  ];
++  assert.ok(Math.abs(spentFromRows(rows as any) - 2.25) < 1e-9);
++  assert.equal(spentFromRows([{ quote: "Q3", shot: "S01", reconcile: "not-created", note: "x", cny: 0 }] as any), 0);
++});
++
++test("I2：spend.jsonl 里的核对行（没有 cny）可以读；坏的核对行报错", async () => {
++  await withFilm({ budget: 100, shots: { S01: 4.4 } }, (dir) => {
++    const lines = [
++      { quote: "Q1", shot: "S01", task: null, uncertain: true, cny: 0.75 },
++      { at: "2026-11-08T00:00:00Z", quote: "Q1", shot: "S01", reconcile: "not-created", note: "没建成" },
++    ];
++    writeFileSync(join(dir, "spend.jsonl"), lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
++    review(dir, "S01", 1, "pass");
++    assert.equal(buildQuote(FILM, ["S01"]).spentCNY, 0);
++    writeFileSync(join(dir, "spend.jsonl"), JSON.stringify({ quote: "Q1", shot: "S01", reconcile: "maybe", note: "x" }) + "\n");
++    assert.throws(() => buildQuote(FILM, ["S01"]), /spend\.jsonl 第 1 行/);
++    writeFileSync(join(dir, "spend.jsonl"), JSON.stringify({ quote: "Q1", shot: "S01", reconcile: "not-created", note: "x", cny: -1 }) + "\n");
++    assert.throws(() => buildQuote(FILM, ["S01"]), /spend\.jsonl 第 1 行/);
++  });
++});
+diff --git a/tests/seedance.test.ts b/tests/seedance.test.ts
+index 9ee74a0..c86fee4 100644
+--- a/tests/seedance.test.ts
++++ b/tests/seedance.test.ts
+@@ -133,22 +133,27 @@ test("闸门 1：报价不存在 / 报价超预算", async () => {
+     const id = await quoteAndApprove("S01,S02");
+     const p = join(c.dir, "quotes", `${id}.json`);
+     const q = JSON.parse(readFileSync(p, "utf8"));
+     q.overBudget = true;
+     writeFileSync(p, JSON.stringify(q));
+     assert.deepEqual(checkGates(FILM, id), [`报价 ${id} 超预算，不能提交`]);
+   });
+ });
+ 
+ test("闸门 2：模型不支持首尾帧（seedance-2.5）", async () => {
+-  await withFilm({}, async () => {
+-    const id = await quoteAndApprove("S01,S02", "2.5");
++  await withFilm({}, async (c) => {
++    // quote.ts 已经不给 2.5 报价；这里手改一份报价和批准，确认闸门 2 自己也拦得住
++    const id = await quoteAndApprove("S01,S02");
++    const qp = join(c.dir, "quotes", `${id}.json`);
++    const ap = join(c.dir, "approvals", `${id}.json`);
++    writeFileSync(qp, JSON.stringify({ ...JSON.parse(readFileSync(qp, "utf8")), model: "2.5", modelId: "seedance-2.5", totalCNY: 5.5 }));
++    writeFileSync(ap, JSON.stringify({ ...JSON.parse(readFileSync(ap, "utf8")), totalCNY: 5.5 }));
+     assert.deepEqual(checkGates(FILM, id), ["模型 seedance-2.5 不支持首尾帧"]);
+   });
+ });
+ 
+ test("闸门 3：最新提交前审核不是通过", async () => {
+   await withFilm({}, async (c) => {
+     const id = await quoteAndApprove("S01,S02");
+     review(c.dir, "S01", 2, "fail");
+     assert.deepEqual(checkGates(FILM, id), ['S01 的提交前审核不是"通过"']);
+   });
+@@ -233,21 +238,22 @@ test("submit：闸门通过后逐镜头建任务、记账、改状态；请求
+       assert.equal(b.resolution, "720p");
+       assert.equal(b.aspect_ratio, "16:9");
+       assert.equal(b.task_mode, "first_last_frame");
+       assert.deepEqual(b.content, [
+         { type: "image_url", role: "first_frame", url: "data:image/png;base64," + Buffer.from(PNG(`${s}-first`)).toString("base64") },
+         { type: "image_url", role: "last_frame", url: "data:image/png;base64," + Buffer.from(PNG(`${s}-last`)).toString("base64") },
+       ]);
+     }
+     const rows = spendLines(c.dir);
+     assert.equal(rows.length, 2);
+-    assert.deepEqual(Object.keys(rows[0]).sort(), ["at", "billable", "cny", "model", "quote", "shot", "task"]);
++    assert.deepEqual(Object.keys(rows[0]).sort(), ["at", "baseUrl", "billable", "cny", "model", "quote", "shot", "task"]);
++    assert.equal(rows[0].baseUrl, c.gw.url);
+     assert.equal(rows[0].quote, id);
+     assert.equal(rows[0].shot, "S01");
+     assert.equal(rows[0].task, "task_fake0001");
+     assert.equal(rows[0].model, "seedance-2.0-mini");
+     assert.equal(rows[0].billable, 5);
+     assert.ok(Math.abs(rows[0].cny - 0.75) < 1e-9);
+     const st = readState(FILM);
+     assert.equal(st.shots.S01.status, "generating");
+     assert.equal(st.shots.S02.status, "generating");
+     assert.ok(Math.abs(st.spentCNY - 1.5) < 1e-9);
+@@ -313,20 +319,21 @@ test("网关报错正文里带 Key 时打印前脱敏；退出 1，不记账", a
+ test("提交时连接断开（结果不明）：退出 1，按可能已扣费记账，之后同一报价不能再提交", async () => {
+   await withFilm({ gw: { creates: ["crash"] } }, async (c) => {
+     const id = await quoteAndApprove("S01,S02");
+     c.out.length = 0;
+     assert.equal(await main(["submit", FILM, "--quote", id]), 1);
+     assert.match(c.out.join("\n"), /结果不明/);
+     const rows = spendLines(c.dir);
+     assert.equal(rows.length, 1);
+     assert.equal(rows[0].task, null);
+     assert.equal(rows[0].uncertain, true);
++    assert.equal(rows[0].baseUrl, c.gw.url);
+     assert.ok(Math.abs(rows[0].cny - 0.75) < 1e-9);
+     assert.equal(c.gw.creates().length, 1);
+     assert.deepEqual(checkGates(FILM, id), [`报价 ${id} 已经提交过`]);
+     noKey(c);
+   });
+ });
+ 
+ test("没设 SEEDANCE_API_KEY：退出 1，不发请求", async () => {
+   await withFilm({}, async (c) => {
+     const id = await quoteAndApprove("S01,S02");
+@@ -520,10 +527,217 @@ test("wait 超时时也把已经出好的片段下载下来，再退出 6", asyn
+     const id = await quoteAndApprove("S01,S02");
+     assert.equal(await main(["submit", FILM, "--quote", id]), 0);
+     c.out.length = 0;
+     assert.equal(await main(["wait", FILM, "--interval", "0.2", "--timeout", "1"]), 6);
+     assert.equal(c.out.at(-1), "还没出完，稍后再 wait");
+     assert.ok(existsSync(join(c.dir, "shots", "S01", "clip-v1.mp4")));
+     assert.equal(readState(FILM).shots.S01.clip, "shots/S01/clip-v1.mp4");
+     assert.equal(readState(FILM).shots.S02.status, "generating");
+   });
+ });
++
++// ---------- 终审 I1：查询出错不直接判死；嵌套状态；网关地址 ----------
++
++function fetchedLines(dir: string): any[] {
++  if (!existsSync(join(dir, "fetched.jsonl"))) return [];
++  return readFileSync(join(dir, "fetched.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
++}
++
++test("I1：单次 fetch / poll 遇到 404 → 不写 fetched.jsonl，镜头仍在生成中", async () => {
++  await withFilm({ shots: ["S01"], gw: { vanish: ["task_fake0001"] } }, async (c) => {
++    const id = await quoteAndApprove("S01");
++    assert.equal(await main(["submit", FILM, "--quote", id]), 0);
++    for (const cmd of ["fetch", "fetch", "poll", "poll", "fetch", "poll"]) await main([cmd, FILM]);
++    assert.deepEqual(fetchedLines(c.dir), []);
++    assert.equal(readState(FILM).shots.S01.status, "generating");
++    c.out.length = 0;
++    assert.equal(await main(["poll", FILM]), 10);
++    assert.match(c.out.join("\n"), /S01 task_fake0001：查询失败：.*404/);
++  });
++});
++
++test("I1：wait 里同一任务连续 404 达到上限（5 次）才判失败", async () => {
++  await withFilm({ shots: ["S01"], gw: { vanish: ["task_fake0001"] } }, async (c) => {
++    const id = await quoteAndApprove("S01");
++    assert.equal(await main(["submit", FILM, "--quote", id]), 0);
++    assert.equal(await main(["wait", FILM, "--interval", "0", "--timeout", "30"]), 0);
++    const q = c.gw.requests.filter((r) => r.method === "GET" && r.path === "/v1/videos/task_fake0001");
++    assert.equal(q.length, 5);
++    const rows = fetchedLines(c.dir);
++    assert.equal(rows.length, 1);
++    assert.equal(rows[0].status, "failed");
++    assert.match(rows[0].error, /连续 5 次查询出错.*404/);
++  });
++});
++
++test("I1：new-api 通用格式 {code,data:{status:\"SUCCESS\"}} 能解析，wait 下载到片子", async () => {
++  await withFilm({ shots: ["S01"], gw: { queryShape: "data", succeedAfter: 2 } }, async (c) => {
++    const id = await quoteAndApprove("S01");
++    assert.equal(await main(["submit", FILM, "--quote", id]), 0);
++    c.out.length = 0;
++    assert.equal(await main(["poll", FILM, "--json"]), 10);
++    assert.equal(JSON.parse(c.out.at(-1)!)[0].status, "queued");
++    assert.equal(await main(["wait", FILM, "--interval", "0", "--timeout", "30"]), 0);
++    assert.ok(existsSync(join(c.dir, "shots", "S01", "clip-v1.mp4")));
++  });
++  await withFilm({ shots: ["S01"], gw: { queryShape: "data", result: "fail" } }, async (c) => {
++    const id = await quoteAndApprove("S01");
++    assert.equal(await main(["submit", FILM, "--quote", id]), 0);
++    c.out.length = 0;
++    assert.equal(await main(["fetch", FILM]), 0);
++    assert.ok(c.out.includes("S01 生成失败：上游失败"), c.out.join("\n"));
++  });
++});
++
++test("I1：status 为空算查询出错，不当作生成中；单次 poll 不写记录，wait 连续 5 次才判失败", async () => {
++  await withFilm({ shots: ["S01"], gw: { queryShape: "empty" } }, async (c) => {
++    const id = await quoteAndApprove("S01");
++    assert.equal(await main(["submit", FILM, "--quote", id]), 0);
++    c.out.length = 0;
++    assert.equal(await main(["poll", FILM, "--json"]), 10);
++    const r = JSON.parse(c.out.at(-1)!)[0];
++    assert.equal(r.status, "unknown");
++    assert.match(r.error, /没有可识别的状态/);
++    assert.deepEqual(fetchedLines(c.dir), []);
++    assert.equal(await main(["wait", FILM, "--interval", "0", "--timeout", "30"]), 0);
++    const rows = fetchedLines(c.dir);
++    assert.equal(rows.length, 1);
++    assert.equal(rows[0].status, "failed");
++    assert.match(rows[0].error, /连续 5 次查询出错/);
++  });
++});
++
++test("I1：当前网关地址和提交时不同 → poll/fetch/wait 跳过这一行、不查询、不写 fetched.jsonl", async () => {
++  await withFilm({ shots: ["S01"] }, async (c) => {
++    const id = await quoteAndApprove("S01");
++    assert.equal(await main(["submit", FILM, "--quote", id]), 0);
++    const submitted = c.gw.url;
++    process.env.SEEDANCE_BASE_URL = submitted.replace("127.0.0.1", "localhost");
++    const before = c.gw.requests.length;
++    for (const argv of [["poll", FILM], ["fetch", FILM], ["wait", FILM, "--interval", "0", "--timeout", "5"]]) {
++      c.out.length = 0;
++      assert.equal(await main(argv), 0, argv.join(" "));
++      assert.ok(c.out.includes(`S01 的任务是在 ${submitted} 提交的，当前网关地址不同，跳过`), c.out.join("\n"));
++    }
++    assert.equal(c.gw.requests.length, before);
++    assert.deepEqual(fetchedLines(c.dir), []);
++    // 地址改回来（末尾多一个 / 也算同一个）就能接着下载
++    process.env.SEEDANCE_BASE_URL = submitted + "/";
++    assert.equal(await main(["wait", FILM, "--interval", "0", "--timeout", "30"]), 0);
++    assert.ok(existsSync(join(c.dir, "shots", "S01", "clip-v1.mp4")));
++  });
++});
++
++test("I1：旧的 spend 行没有 baseUrl 时按默认地址算；当前地址不是默认地址就跳过", async () => {
++  await withFilm({ shots: ["S01"] }, async (c) => {
++    writeFileSync(join(c.dir, "spend.jsonl"), JSON.stringify({ quote: "Q1", shot: "S01", task: "task_old", cny: 0.75 }) + "\n");
++    c.out.length = 0;
++    assert.equal(await main(["fetch", FILM]), 0);
++    assert.ok(c.out.includes("S01 的任务是在 https://newapi.dragon3api.com 提交的，当前网关地址不同，跳过"), c.out.join("\n"));
++    assert.equal(c.gw.requests.length, 0);
++    assert.deepEqual(fetchedLines(c.dir), []);
++  });
++});
++
++// ---------- 终审 I2：结果不明的提交由本人核对 ----------
++
++/** 提交时连接断开 → S01 一行 uncertain。返回报价号。 */
++async function uncertainSubmit(c: Ctx): Promise<string> {
++  const id = await quoteAndApprove("S01,S02");
++  assert.equal(await main(["submit", FILM, "--quote", id]), 1);
++  const rows = spendLines(c.dir);
++  assert.equal(rows.length, 1);
++  assert.equal(rows[0].uncertain, true);
++  return id;
++}
++
++test("I2：reconcile --task 之后 wait 能下载到这一镜；只追加一行，旧行不变", async () => {
++  await withFilm({ gw: { creates: ["crash"], known: ["task_lost01"] } }, async (c) => {
++    const id = await uncertainSubmit(c);
++    const before = readFileSync(join(c.dir, "spend.jsonl"), "utf8");
++    c.out.length = 0;
++    assert.equal(await main(["reconcile", FILM, "--quote", id, "--shot", "S01", "--task", "task_lost01", "--note", "网关后台查到了"]), 0, c.out.join("\n"));
++    const after = readFileSync(join(c.dir, "spend.jsonl"), "utf8");
++    assert.ok(after.startsWith(before));
++    const rows = spendLines(c.dir);
++    assert.equal(rows.length, 2);
++    assert.deepEqual(Object.keys(rows[1]).sort(), ["at", "note", "quote", "reconcile", "shot", "task"]);
++    assert.equal(rows[1].reconcile, "created");
++    assert.equal(rows[1].task, "task_lost01");
++    assert.equal(rows[1].note, "网关后台查到了");
++    assert.equal(readState(FILM).shots.S01.status, "generating");
++    assert.equal(await main(["wait", FILM, "--interval", "0", "--timeout", "30"]), 0);
++    assert.ok(existsSync(join(c.dir, "shots", "S01", "clip-v1.mp4")));
++    assert.equal(readState(FILM).shots.S01.clip, "shots/S01/clip-v1.mp4");
++    // 已花金额不变（建成了就是花了）；同一报价仍不能再提交
++    assert.ok(Math.abs(readState(FILM).spentCNY - 0.75) < 1e-9);
++    assert.deepEqual(checkGates(FILM, id), [`报价 ${id} 已经提交过`]);
++    assert.equal(c.gw.creates().length, 1);
++    noKey(c);
++  });
++});
++
++test("I2：reconcile --not-created 之后已花金额扣掉那一行；quote.ts 和闸门 6 用同一个数；闸门 7 照旧", async () => {
++  await withFilm({ gw: { creates: ["crash"] } }, async (c) => {
++    const id = await uncertainSubmit(c);
++    assert.ok(Math.abs(readState(FILM).spentCNY - 0.75) < 1e-9);
++    assert.equal(await main(["reconcile", FILM, "--quote", id, "--shot", "S01", "--not-created", "--note", "后台没有这个任务，也没扣费"]), 0);
++    const rows = spendLines(c.dir);
++    assert.equal(rows.length, 2);
++    assert.equal(rows[1].reconcile, "not-created");
++    assert.equal(rows[1].task, undefined);
++    assert.equal(rows[1].cny, undefined);
++    assert.equal(readState(FILM).spentCNY, 0);
++    assert.deepEqual(checkGates(FILM, id), [`报价 ${id} 已经提交过`]);
++    // 新报价的"已花"是 0
++    assert.equal(await quote([FILM, "--shots", "S01"]), 0);
++    assert.match(c.out.at(-1)!, /已花 ¥0\.0，预算余 ¥100\.0$/);
++    // 没建成的镜头没有任务可查
++    const before = c.gw.requests.length;
++    assert.equal(await main(["poll", FILM]), 0);
++    assert.equal(c.gw.requests.length, before);
++  });
++});
++
++test("I2：没有 uncertain 行时 reconcile 退出 1，不写任何东西", async () => {
++  await withFilm({}, async (c) => {
++    const id = await quoteAndApprove("S01,S02");
++    assert.equal(await main(["reconcile", FILM, "--quote", id, "--shot", "S01", "--not-created", "--note", "x"]), 1);
++    assert.equal(await main(["submit", FILM, "--quote", id]), 0);
++    const before = readFileSync(join(c.dir, "spend.jsonl"), "utf8");
++    c.out.length = 0;
++    assert.equal(await main(["reconcile", FILM, "--quote", id, "--shot", "S01", "--task", "task_x", "--note", "x"]), 1);
++    assert.match(c.out.at(-1)!, /没有结果不明/);
++    assert.equal(readFileSync(join(c.dir, "spend.jsonl"), "utf8"), before);
++  });
++});
++
++test("I2：同一镜头不能重复核对（无论哪种），退出 1", async () => {
++  await withFilm({ gw: { creates: ["crash"] } }, async (c) => {
++    const id = await uncertainSubmit(c);
++    assert.equal(await main(["reconcile", FILM, "--quote", id, "--shot", "S01", "--not-created", "--note", "没建成"]), 0);
++    c.out.length = 0;
++    assert.equal(await main(["reconcile", FILM, "--quote", id, "--shot", "S01", "--not-created", "--note", "再来"]), 1);
++    assert.match(c.out.at(-1)!, /已经核对过/);
++    assert.equal(await main(["reconcile", FILM, "--quote", id, "--shot", "S01", "--task", "task_y", "--note", "再来"]), 1);
++    assert.equal(spendLines(c.dir).length, 2);
++    assert.equal(readState(FILM).spentCNY, 0);
++  });
++});
++
++test("I2：reconcile 参数不对退出 2（缺 --note、两种都给、都不给、报价号不合法）", async () => {
++  await withFilm({ gw: { creates: ["crash"] } }, async (c) => {
++    const id = await uncertainSubmit(c);
++    for (const argv of [
++      ["reconcile", FILM, "--quote", id, "--shot", "S01", "--not-created"],
++      ["reconcile", FILM, "--quote", id, "--shot", "S01", "--not-created", "--note", "  "],
++      ["reconcile", FILM, "--quote", id, "--shot", "S01", "--task", "t1", "--not-created", "--note", "x"],
++      ["reconcile", FILM, "--quote", id, "--shot", "S01", "--note", "x"],
++      ["reconcile", FILM, "--quote", "q1", "--shot", "S01", "--not-created", "--note", "x"],
++      ["reconcile", FILM, "--shot", "S01", "--not-created", "--note", "x"],
++      ["reconcile", FILM, "--quote", id, "--shot", "S01", "--task", "a b", "--note", "x"],
++    ]) {
++      assert.equal(await main(argv), 2, JSON.stringify(argv));
++    }
++    assert.equal(spendLines(c.dir).length, 1);
++  });
++});
+diff --git a/tests/skill.test.ts b/tests/skill.test.ts
+index f8e0433..fe89be4 100644
+--- a/tests/skill.test.ts
++++ b/tests/skill.test.ts
+@@ -171,10 +171,76 @@ test("trial batch: G5 (human motion check) comes before quoting the remaining sh
+ 
+   const prompts = read(join(STAGES, "5-prompts.md"));
+   const p5 = prompts.indexOf("G5");
+   const pRest = prompts.indexOf("才给其余镜头报价");
+   assert.ok(p5 >= 0 && pRest > p5, "5-prompts.md 要写明试拍先过 G5 再给其余镜头报价");
+ 
+   const gate = gateSection("G5")!;
+   assert.ok(gate.includes("试拍"), "gates.md 的 G5 要写明试拍那批也要问");
+   assert.ok(!gate.includes("进后期`"), "G5 的选项不能只适用于最后一批");
+ });
++
++test("C1: project agent film-reviewer exists, read-only, inherits the session model", () => {
++  const p = join(REPO, ".claude", "agents", "film-reviewer.md");
++  assert.ok(existsSync(p), ".claude/agents/film-reviewer.md 不存在");
++  const text = read(p);
++  const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/.exec(text);
++  assert.ok(m, "film-reviewer.md 开头要有 frontmatter");
++  const fm = m[1];
++  assert.match(fm, /^name: film-reviewer$/m);
++  assert.match(fm, /^description: .*只读.*不改文件/m);
++  assert.match(fm, /^tools: Read, Glob, Grep$/m);
++  assert.match(fm, /^model: inherit$/m);
++  const body = m[2];
++  for (const s of ["只读不改", "reviews/", "state.json", "Read", '"通过"或"不通过"']) {
++    assert.ok(body.includes(s), `film-reviewer.md 正文缺少：${s}`);
++  }
++});
++
++test('C1: the Skill dispatches reviews to film-reviewer, never "Explore"', () => {
++  const texts = allFiles(SKILL).filter((p) => p.endsWith(".md")).map(read).join("\n");
++  assert.ok(!texts.includes('"Explore"'), 'Skill 里还有 "Explore"');
++  assert.ok(read(join(SKILL, "SKILL.md")).includes('subagent_type: "film-reviewer"'), "SKILL.md 要用 film-reviewer 派审核");
++});
++
++test("I3: G4 docs say a bare option number is not approval; the person types 批准 Q<n>", () => {
++  const g4 = gateSection("G4")!;
++  const skill = read(join(SKILL, "SKILL.md"));
++  for (const [name, text] of [["gates.md G4", g4], ["SKILL.md", skill]] as const) {
++    assert.ok(text.includes("只回一个数字不算批准"), `${name} 要写明只回一个数字不算批准`);
++    assert.ok(text.includes("原样打出 `批准 Q<n>`"), `${name} 要写明请本人原样打出 批准 Q<n>`);
++  }
++  for (const bad of ["拒绝批准 Q3", "批准 Q3？", "3"]) assert.ok(!saidApproves(bad, "Q3"), bad);
++});
++
++test(".gitattributes normalizes text to LF (cmd/ps1 CRLF) and gates.md is LF", () => {
++  const ga = read(join(REPO, ".gitattributes"));
++  for (const line of ["* text=auto eol=lf", "*.cmd text eol=crlf", "*.ps1 text eol=crlf"]) {
++    assert.ok(ga.split(/\r?\n/).includes(line), `.gitattributes 缺少：${line}`);
++  }
++  assert.ok(!read(join(SKILL, "references", "gates.md")).includes("\r\n"), "gates.md 还是 CRLF");
++});
++
++test("M-fix: push-in crop example in 4-keyframes.md is centered", () => {
++  const text = read(join(STAGES, "4-keyframes.md"));
++  assert.ok(text.includes("l,t=(W-w)//2,(H-h)//2"), "推近镜头的裁切示例要居中");
++  assert.ok(!text.includes("l,t=0,0"), "不能再默认裁左上角");
++});
++
++test("I2: SKILL.md and README explain reconcile; only after the person gives a task id or says 没建成 this turn", () => {
++  const skill = read(join(SKILL, "SKILL.md"));
++  const readme = read(join(REPO, "README.md"));
++  for (const [name, text] of [["SKILL.md", skill], ["README.md", readme]] as const) {
++    assert.ok(text.includes("seedance.ts reconcile"), `${name} 要写 reconcile 命令`);
++    assert.ok(text.includes("--not-created"), `${name} 要写 --not-created`);
++    assert.ok(text.includes("网关后台"), `${name} 要写本人去网关后台查`);
++  }
++  assert.ok(skill.includes("本人在这一轮明确给出任务号或说\"没建成\""), "SKILL.md 要写明只在本人当轮明确给出任务号或说没建成之后才运行");
++});
++
++test("misc: 继续做 handles an approved-but-not-submitted quote without re-running approve.ts", () => {
++  const skill = read(join(SKILL, "SKILL.md"));
++  const sec = skill.slice(skill.indexOf("## 继续做"), skill.indexOf("## 每一步怎么做"));
++  assert.ok(sec.includes("approvals/Q<n>.json"), "继续做 要检查 approvals/Q<n>.json");
++  assert.ok(sec.includes("Q<n> 之前批准过、还没提交，现在提交吗"), "继续做 要先问本人");
++  assert.ok(sec.includes("不要再运行 `approve.ts`"), "继续做 要写明不要再运行 approve.ts");
++});

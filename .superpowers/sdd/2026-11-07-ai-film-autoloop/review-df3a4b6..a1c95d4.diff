@@ -1,0 +1,124 @@
+# Review package: df3a4b6..HEAD
+
+## Commits
+a1c95d4 fix: 额度判断不把回显的提示词算进去
+
+## Files changed
+ scripts/codex-image.ts    | 18 ++++++++++++++++--
+ tests/codex-image.test.ts | 16 ++++++++++++++++
+ 2 files changed, 32 insertions(+), 2 deletions(-)
+
+## Diff
+diff --git a/scripts/codex-image.ts b/scripts/codex-image.ts
+index 0321cd4..a5dad7a 100644
+--- a/scripts/codex-image.ts
++++ b/scripts/codex-image.ts
+@@ -34,20 +34,33 @@ const TIMEOUT_MS = 15 * 60_000;
+ export function parseOut(kind: Kind, out: string): { dir: string; base: string } | null {
+   const parts = out.split("/");
+   if (kind === "style" || kind === "sheet") {
+     if (parts.length !== 2 || parts[0] !== "style" || !NAME_RE.test(parts[1])) return null;
+     return { dir: "style", base: parts[1] };
+   }
+   if (parts.length !== 3 || parts[0] !== "shots" || !SHOT_RE.test(parts[1]) || parts[2] !== kind) return null;
+   return { dir: `shots/${parts[1]}`, base: kind };
+ }
+ 
++/**
++ * 输出里是否有额度报错。真 codex 会在开头回显提示词（user 下面那段），
++ * 所以先去掉与本次提示词相同的行，免得提示词里的 quota/额度 被误判。
++ */
++export function quotaError(output: string, sentPrompt: string): boolean {
++  const norm = (l: string) => l.trim();
++  const promptLines = new Set(sentPrompt.split(/\r?\n/).map(norm).filter(Boolean));
++  return output
++    .split(/\r?\n/)
++    .filter((l) => !promptLines.has(norm(l)))
++    .some((l) => QUOTA_RE.test(l));
++}
++
+ /** 从 PNG 文件头（IHDR）读宽高；不是 PNG 返回 null。 */
+ export function pngSize(buf: Uint8Array): { width: number; height: number } | null {
+   const sig = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+   if (buf.length < 24 || sig.some((b, i) => buf[i] !== b)) return null;
+   const b = Buffer.from(buf.buffer, buf.byteOffset, buf.byteLength);
+   if (b.toString("ascii", 12, 16) !== "IHDR") return null;
+   return { width: b.readUInt32BE(16), height: b.readUInt32BE(20) };
+ }
+ 
+ /** 加上固定开头；文件里已经有就不重复加。 */
+@@ -172,30 +185,31 @@ export async function main(argv: string[]): Promise<number> {
+   }
+ 
+   const cmd = [
+     ...resolveCommand("FILM_CODEX_CMD", ["codex"]),
+     "exec", "--skip-git-repo-check", "-s", "read-only",
+     ...refs.flatMap((r) => ["-i", r]),
+     "-",
+   ];
+   // 留 1 秒余量，防文件系统时间精度/时钟取整把本次的图漏掉
+   const started = Date.now() - 1000;
+-  const res = await run(cmd, { cwd: dir, stdin: withPrefix(prompt), timeoutMs: TIMEOUT_MS });
++  const sent = withPrefix(prompt);
++  const res = await run(cmd, { cwd: dir, stdin: sent, timeoutMs: TIMEOUT_MS });
+   const output = `${res.stdout}\n${res.stderr}`;
+ 
+   const session = SESSION_RE.exec(output)?.[1];
+   const root = imagesRoot();
+   const image = session ? newestPng(join(root, session), started, 0) : newestPng(root, started, 1);
+ 
+   if (!image) {
+     const tail = res.stderr.trim().split(/\r?\n/).slice(-3).join("\n");
+-    if (QUOTA_RE.test(output)) {
++    if (quotaError(output, sent)) {
+       console.error("Codex 额度用完");
+       if (tail) console.error(tail);
+       return 5;
+     }
+     console.error(`Codex 没有出图（退出码 ${res.code}）`);
+     if (tail) console.error(tail);
+     return 3;
+   }
+ 
+   const data = readFileSync(image);
+diff --git a/tests/codex-image.test.ts b/tests/codex-image.test.ts
+index 2a99205..16010b1 100644
+--- a/tests/codex-image.test.ts
++++ b/tests/codex-image.test.ts
+@@ -159,20 +159,36 @@ test("missing ref is an error and codex is not called", async () => {
+ });
+ 
+ test("quota error exits 5", async () => {
+   await withFilm({ gates: ["G1"], mode: "quota" }, async (c) => {
+     assert.equal(await main(args(c, "style", "style/look")), 5);
+     assert.match(text(c), /Codex 额度用完/);
+     assert.equal(existsSync(join(c.dir, "style")), false);
+   });
+ });
+ 
++test("quota words echoed from the prompt are not a quota error", async () => {
++  const PROMPT = "画一个写着 quota、rate limit、额度 的告示牌。\r\n第二行也提到 Quota。";
++  await withFilm({ gates: ["G1"], mode: "noimage" }, async (c) => {
++    writeFileSync(join(c.root, "prompt.txt"), PROMPT);
++    assert.equal(await main(args(c, "style", "style/look")), 3);
++    assert.match(text(c), /Codex 没有出图/);
++    assert.doesNotMatch(text(c), /Codex 额度用完/);
++  });
++  // 同样的提示词，真有额度报错行时仍然退出 5
++  await withFilm({ gates: ["G1"], mode: "noimage,quota" }, async (c) => {
++    writeFileSync(join(c.root, "prompt.txt"), PROMPT);
++    assert.equal(await main(args(c, "style", "style/look")), 5);
++    assert.match(text(c), /Codex 额度用完/);
++  });
++});
++
+ test("no image exits 3, ignoring older images in the image folder", async () => {
+   await withFilm({ gates: ["G1"], mode: "noid,noimage" }, async (c) => {
+     const old = join(c.images, "old-session", "exec-old.png");
+     mkdirSync(dirname(old), { recursive: true });
+     writeFileSync(old, readFileSync(FAKE)); // 内容无所谓
+     const past = new Date(Date.now() - 3600_000);
+     utimesSync(old, past, past);
+     assert.equal(await main(args(c, "style", "style/look")), 3);
+     assert.match(text(c), /Codex 没有出图/);
+     assert.equal(existsSync(join(c.dir, "style")), false);

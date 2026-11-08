@@ -1,0 +1,219 @@
+# Review package: c6b1a98..HEAD
+
+## Commits
+6b7dc93 chore: 项目骨架与基础库
+
+## Files changed
+ config/pricing.json      |  4 ++
+ package.json             | 10 +++++
+ scripts/lib/hash.ts      |  7 ++++
+ scripts/lib/paths.ts     | 24 ++++++++++++
+ scripts/lib/versioned.ts | 28 ++++++++++++++
+ tests/lib.test.ts        | 95 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 6 files changed, 168 insertions(+)
+
+## Diff
+diff --git a/config/pricing.json b/config/pricing.json
+new file mode 100644
+index 0000000..ddf2b3a
+--- /dev/null
++++ b/config/pricing.json
+@@ -0,0 +1,4 @@
++{ "default": "mini",
++  "models": {
++    "mini": { "id": "doubao-seedance-2-0-mini-260615", "cnyPerSecond720p": 0.5 },
++    "2.5":  { "id": "doubao-seedance-2-5-260628",      "cnyPerSecond720p": 1.5 } } }
+diff --git a/package.json b/package.json
+new file mode 100644
+index 0000000..5209402
+--- /dev/null
++++ b/package.json
+@@ -0,0 +1,10 @@
++{
++  "name": "ai-film-autoloop",
++  "version": "0.1.0",
++  "private": true,
++  "type": "module",
++  "engines": { "node": ">=24" },
++  "scripts": {
++    "test": "node --test \"tests/**/*.test.ts\""
++  }
++}
+diff --git a/scripts/lib/hash.ts b/scripts/lib/hash.ts
+new file mode 100644
+index 0000000..99eb101
+--- /dev/null
++++ b/scripts/lib/hash.ts
+@@ -0,0 +1,7 @@
++import { createHash } from "node:crypto";
++import { readFileSync } from "node:fs";
++
++/** 文件内容的 SHA-256，小写十六进制。 */
++export function sha256File(path: string): string {
++  return createHash("sha256").update(readFileSync(path)).digest("hex");
++}
+diff --git a/scripts/lib/paths.ts b/scripts/lib/paths.ts
+new file mode 100644
+index 0000000..7b3fafc
+--- /dev/null
++++ b/scripts/lib/paths.ts
+@@ -0,0 +1,24 @@
++import { dirname, join, resolve } from "node:path";
++import { fileURLToPath } from "node:url";
++
++const FILM_NAME_RE = /^[A-Za-z0-9_\-\u4e00-\u9fa5]{1,40}$/;
++
++/** 项目根：FILM_ROOT 优先，否则为仓库根（按本文件位置定位，与 cwd 无关）。 */
++export function projectRoot(): string {
++  const env = process.env.FILM_ROOT;
++  if (env) return resolve(env);
++  return resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
++}
++
++/** 片名只允许 [A-Za-z0-9_\-\u4e00-\u9fa5]{1,40}，否则抛错。 */
++export function assertFilmName(film: string): void {
++  if (typeof film !== "string" || !FILM_NAME_RE.test(film)) {
++    throw new Error(`片名不合法：${film}`);
++  }
++}
++
++/** films/<片名> 的绝对路径（先校验片名）。 */
++export function filmDir(film: string): string {
++  assertFilmName(film);
++  return join(projectRoot(), "films", film);
++}
+diff --git a/scripts/lib/versioned.ts b/scripts/lib/versioned.ts
+new file mode 100644
+index 0000000..e0f3391
+--- /dev/null
++++ b/scripts/lib/versioned.ts
+@@ -0,0 +1,28 @@
++import { readdirSync, writeFileSync } from "node:fs";
++import { join } from "node:path";
++
++function escapeRe(s: string): string {
++  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
++}
++
++/** 返回 <dir>/<base>-v<n>.<ext>，n = 已有最大版本号 + 1，从 1 开始；目录不存在视为空。 */
++export function nextVersionPath(dir: string, base: string, ext: string): string {
++  const re = new RegExp(`^${escapeRe(base)}-v(\\d+)\\.${escapeRe(ext)}$`);
++  let names: string[] = [];
++  try {
++    names = readdirSync(dir);
++  } catch (err) {
++    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
++  }
++  let max = 0;
++  for (const name of names) {
++    const m = re.exec(name);
++    if (m) max = Math.max(max, Number(m[1]));
++  }
++  return join(dir, `${base}-v${max + 1}.${ext}`);
++}
++
++/** 只写新文件：已存在就抛错（flag "wx"），不覆盖。 */
++export function writeNew(path: string, data: string | Uint8Array): void {
++  writeFileSync(path, data, { flag: "wx" });
++}
+diff --git a/tests/lib.test.ts b/tests/lib.test.ts
+new file mode 100644
+index 0000000..06a3fee
+--- /dev/null
++++ b/tests/lib.test.ts
+@@ -0,0 +1,95 @@
++import { test } from "node:test";
++import assert from "node:assert/strict";
++import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
++import { tmpdir } from "node:os";
++import { join, basename, resolve } from "node:path";
++import { projectRoot, filmDir, assertFilmName } from "../scripts/lib/paths.ts";
++import { nextVersionPath, writeNew } from "../scripts/lib/versioned.ts";
++import { sha256File } from "../scripts/lib/hash.ts";
++
++function tempDir(): string {
++  return mkdtempSync(join(tmpdir(), "film-lib-"));
++}
++
++test("nextVersionPath 空目录返回 v1", () => {
++  const dir = tempDir();
++  try {
++    const p = nextVersionPath(dir, "plan", "md");
++    assert.equal(basename(p), "plan-v1.md");
++    assert.equal(resolve(p), resolve(join(dir, "plan-v1.md")));
++  } finally {
++    rmSync(dir, { recursive: true, force: true });
++  }
++});
++
++test("nextVersionPath 已有 v1、v3 时返回 v4，忽略其他文件", () => {
++  const dir = tempDir();
++  try {
++    writeFileSync(join(dir, "plan-v1.md"), "a");
++    writeFileSync(join(dir, "plan-v3.md"), "b");
++    writeFileSync(join(dir, "plan-v9.txt"), "other ext");
++    writeFileSync(join(dir, "xplan-v7.md"), "other base");
++    assert.equal(basename(nextVersionPath(dir, "plan", "md")), "plan-v4.md");
++  } finally {
++    rmSync(dir, { recursive: true, force: true });
++  }
++});
++
++test("writeNew 写已存在文件时抛错且原内容不变", () => {
++  const dir = tempDir();
++  try {
++    const p = join(dir, "a.txt");
++    writeNew(p, "原内容");
++    assert.equal(readFileSync(p, "utf8"), "原内容");
++    assert.throws(() => writeNew(p, "新内容"));
++    assert.equal(readFileSync(p, "utf8"), "原内容");
++  } finally {
++    rmSync(dir, { recursive: true, force: true });
++  }
++});
++
++test("assertFilmName 合法与不合法", () => {
++  assert.doesNotThrow(() => assertFilmName("雨夜邮差"));
++  assert.throws(() => assertFilmName("../x"), { message: "片名不合法：../x" });
++  assert.throws(() => assertFilmName(""), { message: "片名不合法：" });
++});
++
++test("projectRoot 优先用 FILM_ROOT，filmDir 位于 films/<片名>", () => {
++  const dir = tempDir();
++  const old = process.env.FILM_ROOT;
++  try {
++    process.env.FILM_ROOT = dir;
++    assert.equal(projectRoot(), resolve(dir));
++    assert.equal(filmDir("雨夜邮差"), join(resolve(dir), "films", "雨夜邮差"));
++    assert.throws(() => filmDir("../x"), { message: "片名不合法：../x" });
++  } finally {
++    if (old === undefined) delete process.env.FILM_ROOT;
++    else process.env.FILM_ROOT = old;
++    rmSync(dir, { recursive: true, force: true });
++  }
++});
++
++test("未设 FILM_ROOT 时 projectRoot 为仓库根（与 cwd 无关）", () => {
++  const old = process.env.FILM_ROOT;
++  try {
++    delete process.env.FILM_ROOT;
++    const repoRoot = resolve(import.meta.dirname, "..");
++    assert.equal(projectRoot(), repoRoot);
++  } finally {
++    if (old !== undefined) process.env.FILM_ROOT = old;
++  }
++});
++
++test("sha256File 对 abc 返回小写十六进制", () => {
++  const dir = tempDir();
++  try {
++    const p = join(dir, "abc.txt");
++    writeFileSync(p, "abc");
++    assert.equal(
++      sha256File(p),
++      "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
++    );
++  } finally {
++    rmSync(dir, { recursive: true, force: true });
++  }
++});
