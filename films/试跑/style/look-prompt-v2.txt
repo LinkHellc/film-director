@@ -1,0 +1,12 @@
+Style sample frame for an animated short. Wide 16:9 landscape image.
+
+Art style: soft, cute 3D plush-toy / clay look — rounded chubby shapes, short matte felt-like fur, simple bead-like eyes, soft rounded lighting, like a stop-motion felt animation. No film grain.
+
+Scene: a real, ordinary bedroom at night, eye-level camera facing a bed. The lower part of the frame is a large grey-blue pillow (#8fa3b6) lying against a dark warm-beige wall (#3a3129, the wall is dim at night). No headboard visible. On the far left, a small bedside lamp on a nightstand glows warm yellow (#f5c97a); it is the only light source, lighting the scene from the upper left. The lighting is steady and soft.
+
+Characters: exactly two cats sitting side by side on the pillow, both facing the camera, mouths closed, looking straight at the viewer with serious, earnest little faces.
+- Left cat: an orange tabby (#e0893a with darker orange stripes #a85a22). Its head is at about 38% of the frame width from the left.
+- Right cat: a pure white cat (#f4f2ee) with no markings. Its head is at about 62% of the frame width from the left.
+- A small gap between the two cats; their bodies do not overlap.
+
+Constraints: only these two cats, no people. No text, letters, or watermarks anywhere. No mirrors and no reflections.

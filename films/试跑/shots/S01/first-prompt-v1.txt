@@ -1,0 +1,15 @@
+First frame of a short film shot. Wide 16:9 landscape image.
+
+Art style: photorealistic cute cats, like a real photograph taken with a good camera — real fur, round faces, very big round glossy eyes, soft warm lamp light, background in soft-focus blur. Exactly the same look, framing and lighting as the third attached reference image (the two cats on the pillow). Not a cartoon, not 3D animation, not a painting.
+
+Camera: eye level, facing the two cats straight on. Medium close-up: the cats are visible from the chest up; their front paws and tails are NOT in the frame.
+
+Background: a real bedroom at night. The wall behind them is a dim, dark warm brown (#3a3129), softly blurred. In the top-left corner (within the left 0–18% of the frame width and top 0–35% of the frame height) there is a blurred warm-yellow bedside lamp (#f5c97a) — only the lampshade and upper lamp body are visible, and it does not touch or overlap the orange cat's ears. The lamp is the only light source, lighting the cats softly from the upper left. Along the bottom edge is the top of one soft grey-blue pillow (#8fa3b6). Nothing else.
+
+Characters — exactly two cats, nothing else alive in the frame:
+- LEFT: the orange tabby cat from the first attached reference (character sheet). Warm orange fur #e0893a with darker orange stripes #a85a22, a dark "M"-shaped stripe on the forehead, cream-orange chest and muzzle, big round amber eyes, small pink nose, no collar. Its head is at about 38% of the frame width from the left. Face toward the camera, head tilted slightly toward the left of the frame, mouth closed, serious earnest expression.
+- RIGHT: the pure white cat from the second attached reference (character sheet). Pure white fluffy fur #f4f2ee with no markings anywhere, big round hazel / greenish-grey eyes, small pink nose, no collar. Its head is at about 62% of the frame width from the left. Face straight toward the camera, head upright, mouth closed, serious earnest expression.
+- A small gap between the two cats; their bodies do not overlap.
+- Leave about 8% of the frame height of empty space above each cat's ears.
+
+Constraints: only these two cats, no people, no other objects besides the wall, the lamp and the pillow. No text, letters, or watermarks. No mirrors and no reflections.

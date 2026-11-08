@@ -1,0 +1,30 @@
+{
+  "film": "试跑",
+  "stage": "done",
+  "settings": {
+    "seconds": 5,
+    "aspect": "16:9",
+    "budgetCNY": 30,
+    "music": "占位节拍音，5 秒，120 BPM",
+    "subtitles": true,
+    "model": "mini"
+  },
+  "gates": {
+    "G0": "approved",
+    "G1": "approved",
+    "G2": "approved",
+    "G3": "approved",
+    "G3b": "approved",
+    "G4": "approved",
+    "G5": "approved",
+    "G6": "approved"
+  },
+  "shots": {
+    "S01": {
+      "seconds": 5,
+      "status": "accepted",
+      "clip": "shots/S01/clip-v2.mp4"
+    }
+  },
+  "spentCNY": 3.6
+}
