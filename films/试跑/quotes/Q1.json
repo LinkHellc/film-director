@@ -1,0 +1,19 @@
+{
+  "id": "Q1",
+  "film": "试跑",
+  "model": "mini",
+  "modelId": "seedance-2.0-mini",
+  "shots": [
+    {
+      "shot": "S01",
+      "seconds": 5,
+      "billable": 6,
+      "reviewHash": "e7d3ea0dfa3e385cc4f0a79f37b05b2afd22d1c26ad028cf1180b9a1449cd5c6"
+    }
+  ],
+  "totalCNY": 0.9,
+  "spentCNY": 0,
+  "budgetCNY": 30,
+  "overBudget": false,
+  "createdAt": "2026-11-08T08:05:01.225Z"
+}

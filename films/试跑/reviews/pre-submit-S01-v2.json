@@ -1,0 +1,17 @@
+{
+  "kind": "pre-submit",
+  "film": "试跑",
+  "shot": "S01",
+  "verdict": "pass",
+  "at": "2026-11-08T08:05:00.936Z",
+  "files": {
+    "E:/05_AI/04_Claude短片流/films/试跑/shots/S01/prompt-v2.txt": "68e0fa162c88ca2482558b3d7bf654907217e5ab7bed1c2b420b9dc4290967e7",
+    "E:/05_AI/04_Claude短片流/films/试跑/shots/S01/first-v1.png": "2c6e4ff5ac11856adb8ade94c6dc7e94133676da37894fccad560f03e0a6cf9f",
+    "E:/05_AI/04_Claude短片流/films/试跑/shots/S01/last-v1.png": "f33a70584ed119d69732c1a82859e81451149f631527ccbca8415ad033837211",
+    "E:/05_AI/04_Claude短片流/films/试跑/style/sheet-橘猫-v1.png": "1337e4dcc38ad516ca5976f779be7b0ce3c75578c946ecf693c44c58223a1ef6",
+    "E:/05_AI/04_Claude短片流/films/试跑/style/sheet-白猫-v1.png": "33056a938377d5c70c2ee9e06594e00d40e5b0e4a12f5d3c50a3351274a7ec8c",
+    "E:/05_AI/04_Claude短片流/films/试跑/board/storyboard-v3.md": "ca1e696a164018becd0f814db87c67bbe80c911ab0acef006a7be8dc2e887e58",
+    "E:/05_AI/04_Claude短片流/films/试跑/board/palette-v3.md": "7c05b4596904117ddd1728143c8f23c7d8996e666a5ec49700dc5f25d3f2fc10",
+    "E:/05_AI/04_Claude短片流/films/试跑/requirements.md": "387c0abfd44e9457fbd3c7ae6e98c47cd921fee6f8d639784b0e336976984278"
+  }
+}

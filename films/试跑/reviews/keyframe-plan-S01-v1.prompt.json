@@ -1,0 +1,11 @@
+{
+  "kind": "keyframe-plan",
+  "film": "试跑",
+  "shot": "S01",
+  "n": 1,
+  "files": {
+    "E:/05_AI/04_Claude短片流/films/试跑/shots/S01/plan-v1.md": "a2ed98f2713ef0346383616ba056504b941d451285aeb079ecd73d64c234bfdd",
+    "E:/05_AI/04_Claude短片流/films/试跑/board/storyboard-v3.md": "ca1e696a164018becd0f814db87c67bbe80c911ab0acef006a7be8dc2e887e58",
+    "E:/05_AI/04_Claude短片流/films/试跑/requirements.md": "09d157b604bbd3c05ff6bcad087d4ada3bba7c434a76935c5213ae5242521c64"
+  }
+}

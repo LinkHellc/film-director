@@ -1,0 +1,17 @@
+{
+  "kind": "final",
+  "film": "试跑",
+  "shot": null,
+  "verdict": "pass",
+  "at": "2026-11-08T12:29:58.573Z",
+  "files": {
+    "E:/05_AI/04_Claude短片流/films/试跑/out/final-v2.mp4": "77a7d0112bc6280b6a2e56b98f7c52f8fac10f620f166606afd93e9377324bae",
+    "E:/05_AI/04_Claude短片流/films/试跑/out/final-v2-frames/t0000000ms.png": "db3528a2d68e4d276c49f963de83a173099ee372a495de60bb1a275bbf249d3b",
+    "E:/05_AI/04_Claude短片流/films/试跑/out/final-v2-frames/t0000017ms.png": "a5123809d6bc63558cb52826817b9385e9cd70e9cb32e0ecacad0b664f5c0a3b",
+    "E:/05_AI/04_Claude短片流/films/试跑/out/final-v2-frames/t0001300ms.png": "d1920284d47f1ad45c6918b1be8c6389b74c60b7e9b75bfca2b777f7214a66a4",
+    "E:/05_AI/04_Claude短片流/films/试跑/out/final-v2-frames/t0003600ms.png": "83d3b4f11ae1e64cd2ae86a9a3008f275905c76ba9720ef7713a4ac04cbd6355",
+    "E:/05_AI/04_Claude短片流/films/试跑/out/final-v2-frames/t0004967ms.png": "f6c34f6ed0be555ce6a50e25ed83c95548ae0451d37f746f601c84e94ee9c0e1",
+    "E:/05_AI/04_Claude短片流/films/试跑/out/final-v2-frames/t0004983ms.png": "ca6e7c29951cdcd89a1e52bd44c70d25b5f42783c0982cd2ac8cd49d20f09b5b",
+    "E:/05_AI/04_Claude短片流/films/试跑/requirements.md": "39341701a497e226be749e1d2cdef9cf594bf4296357d0e26970087fcbbb70a8"
+  }
+}

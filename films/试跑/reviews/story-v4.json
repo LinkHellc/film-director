@@ -1,0 +1,11 @@
+{
+  "kind": "story",
+  "film": "试跑",
+  "shot": null,
+  "verdict": "fail",
+  "at": "2026-11-08T00:40:49.137Z",
+  "files": {
+    "E:/05_AI/04_Claude短片流/films/试跑/story/shots-v4.md": "1d54b712475de95231d7c48e87623f8cb2205af0eed1cda970d9353d669e465e",
+    "E:/05_AI/04_Claude短片流/films/试跑/requirements.md": "7fd2a68e6df55bfcfdc20e00842e438fc15c46412ce66cfd642dcece61a798d9"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "kind": "keyframes",
+  "film": "试跑",
+  "shot": "S01",
+  "verdict": "pass",
+  "at": "2026-11-08T07:52:58.232Z",
+  "files": {
+    "E:/05_AI/04_Claude短片流/films/试跑/shots/S01/first-v1.png": "2c6e4ff5ac11856adb8ade94c6dc7e94133676da37894fccad560f03e0a6cf9f",
+    "E:/05_AI/04_Claude短片流/films/试跑/shots/S01/last-v1.png": "f33a70584ed119d69732c1a82859e81451149f631527ccbca8415ad033837211",
+    "E:/05_AI/04_Claude短片流/films/试跑/style/sheet-橘猫-v1.png": "1337e4dcc38ad516ca5976f779be7b0ce3c75578c946ecf693c44c58223a1ef6",
+    "E:/05_AI/04_Claude短片流/films/试跑/style/sheet-白猫-v1.png": "33056a938377d5c70c2ee9e06594e00d40e5b0e4a12f5d3c50a3351274a7ec8c",
+    "E:/05_AI/04_Claude短片流/films/试跑/shots/S01/plan-v1.md": "a2ed98f2713ef0346383616ba056504b941d451285aeb079ecd73d64c234bfdd",
+    "E:/05_AI/04_Claude短片流/films/试跑/requirements.md": "09d157b604bbd3c05ff6bcad087d4ada3bba7c434a76935c5213ae5242521c64"
+  }
+}
